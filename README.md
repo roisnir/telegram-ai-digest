@@ -1,123 +1,141 @@
 
 # Telegram AI Digest Generator
 
-![telegram-ai-digest-generator](https://github.com/user-attachments/assets/f35701c3-55de-4f5d-b287-8012b901a2eb)
-
-_Made by [t.me/aizvestia](https://t.me/aizvestia)_
-
-Python script fetches Telegram channel messages, processes them into a digest via Claude AI, generates an image with Replicate API, and sends both to user's saved Telegram messages.
+Python script that fetches messages from Telegram channels, summarizes them with Claude AI, and publishes the result as a Telegraph page (Hebrew, Instant View). The Telegraph URL is sent to a private Telegram channel.
 
 ## Features
 
-- **Telegram API**: Fetches messages from a Telegram channel.
-- **Claude AI**: Generates a digest from the combined messages.
-- **Replicate API**: Generates an image based on the digest (FLUX + LoRa).
-- **Asyncio**: Utilizes asynchronous programming to handle API requests efficiently.
+- **Telegram API**: Fetches last 24h of messages from one or more channels via Telethon (user account).
+- **Claude AI**: Classifies and summarizes stories into a structured Hebrew digest.
+- **Telegraph**: Publishes the digest as a Telegraph page with Instant View support.
 
 ## Requirements
 
-The following Python libraries are required to run the script:
-
-- `aiohttp`
-- `telethon`
-- `pytz`
-- `replicate`
-- `requests`
-- `argparse`
-- `logging`
-
-You can install the required libraries by running:
-
-```bash
-pip install -r requirements.txt
-```
+- Python 3.12+
+- Docker (optional, for server deployment)
+- A Telegram user account with API credentials
 
 ## Setup
 
-1. Clone the repository and navigate to the project directory.
+### 1. Clone the repository
 
-2. Create a `.env` file in the root directory to store your environment variables.
+```bash
+git clone <repo-url>
+cd telegram-ai-digest
+```
 
-Example `.env` file:
+### 2. Create a `.env` file
 
 ```
 API_ID=<your_telegram_api_id>
 API_HASH=<your_telegram_api_hash>
 PHONE_NUMBER=<your_phone_number>
-CHANNEL_USERNAME=<your_telegram_channel_username>
+CHANNEL_USERNAMES=channel_one,channel_two
+TARGET_CHANNEL=-1001234567890
 CLAUDE_API_KEY=<your_claude_api_key>
-REPLICATE_API_TOKEN=<your_replicate_api_token>
 ```
 
-3. Install dependencies:
+### 3. Authenticate Telegram (first run only)
+
+Telethon requires interactive phone authentication on first run. Run the script locally once to generate the `session.session` file:
 
 ```bash
 pip install -r requirements.txt
-```
-
-## Usage
-
-To run the script, use the following command:
-
-```bash
 python digest.py
 ```
 
-### Date Range Arguments
-
-This script enables custom date ranges for digests via `start_date` and `end_date` arguments in `YYYY-MM-DD` format, defining the message fetch period. Without arguments, it defaults to the last 7 days, allowing for various timeframes like weekly reports or project milestones.
-
-Example usage with date range:
-
-```bash
-python digest.py --start_date 2023-09-01 --end_date 2023-09-07
-```
-
-In this example, the script fetches messages from the specified Telegram channel between September 1-7, 2023. Without these arguments, it generates a digest for the last 7 days by default.
-
-The script will:
-1. Load the environment variables from the `.env` file.
-2. Fetch messages from the specified Telegram channel.
-3. Process the messages into a digest using the Claude AI API.
-4. Generate an image using the Replicate API.
-5. Send the digest (with the generated image) to your saved messages on Telegram.
-
-## Environment Variables
-
-The script requires the following environment variables to be set in a `.env` file:
-
-- `API_ID`: Your Telegram API ID.
-- `API_HASH`: Your Telegram API hash.
-- `PHONE_NUMBER`: Your phone number registered with Telegram.
-- `CHANNEL_USERNAME`: The username of the Telegram channel to fetch messages from.
-- `CLAUDE_API_KEY`: API key for Claude AI to generate text digest.
-- `REPLICATE_API_TOKEN`: API token for Replicate API to generate images.
+Enter the verification code when prompted. After this, `session.session` is saved and all future runs (including Docker) are non-interactive.
 
 ## How to Obtain API Tokens
 
 ### Telegram API Credentials
 
-1. Go to [Telegram's my.telegram.org](https://my.telegram.org/) and log in with your Telegram account.
-2. Navigate to the "API development tools" section.
-3. Create a new application and you will receive your `API_ID` and `API_HASH`.
-4. Use your Telegram-registered phone number for the `PHONE_NUMBER` value.
-5. Find the username of the Telegram channel you wish to fetch messages from and add it to `CHANNEL_USERNAME`.
+1. Go to [my.telegram.org](https://my.telegram.org/) and log in.
+2. Navigate to "API development tools" and create a new application.
+3. Copy `API_ID` and `API_HASH` into your `.env`.
 
 ### Claude AI API Key
 
-1. Register or sign in to Claude AI (from Anthropic) via their developer console.
-2. Go to the API section and generate your API key.
-3. Use this key as `CLAUDE_API_KEY` in your `.env` file.
+1. Sign in to the [Anthropic Console](https://console.anthropic.com/).
+2. Generate an API key and set it as `CLAUDE_API_KEY`.
 
-### Replicate API Token
+## Docker Deployment
 
-1. Sign up or log in at [Replicate](https://replicate.com/).
-2. Navigate to the account settings and find your API token.
-3. Use the API token as `REPLICATE_API_TOKEN` in your `.env` file.
+### Build the image
+
+```bash
+docker build -t telegram-ai-digest .
+```
+
+### Prepare the data directory on your server
+
+Copy these files to a persistent directory on your server (e.g. `/opt/digest/`):
+
+```
+/opt/digest/
+├── .env                   # your environment variables
+├── session.session        # generated during first-run auth above
+└── telegraph_token.txt    # auto-created on first Docker run
+```
+
+### Run manually (test)
+
+```bash
+docker run --rm \
+  -v /opt/telegram-news-digest/.env:/app/.env:ro \
+  -v /opt/telegram-news-digest/session.session:/app/session.session \
+  -v /opt/telegram-news-digest/telegraph_token.txt:/app/telegraph_token.txt \
+  telegram-ai-digest
+```
+
+`telegraph_token.txt` will be created automatically on the first run if it doesn't exist — just ensure the file exists on the host beforehand:
+
+```bash
+touch /opt/telegram-news-digest/telegraph_token.txt
+```
+
+## Scheduling with crontab
+
+To run the digest automatically at **07:00** and **19:00** every day, add the following to your server's crontab (`crontab -e`):
+
+```cron
+0 7,19 * * * docker run --rm \
+  -v /opt/telegram-news-digest/.env:/app/.env:ro \
+  -v /opt/telegram-news-digest/session.session:/app/session.session \
+  -v /opt/telegram-news-digest/telegraph_token.txt:/app/telegraph_token.txt \
+  telegram-ai-digest >> /var/log/digest.log 2>&1
+```
+
+> **Note:** The times are in the server's local timezone. If your server runs UTC and you want 07:00 and 19:00 Israel time (UTC+3), use `0 4,16 * * *` instead (adjust for DST as needed).
+
+To verify the crontab was saved:
+
+```bash
+crontab -l
+```
+
+To tail the logs:
+
+```bash
+tail -f /var/log/digest.log
+```
+
+## Usage
+
+Run manually:
+
+```bash
+python digest.py
+```
+
+The script will:
+1. Fetch messages from the configured Telegram channels (last 24h).
+2. Classify and summarize them into a Hebrew digest using Claude AI.
+3. Publish the digest to Telegraph and send the URL to the target Telegram channel.
 
 ## Logging
 
-The script uses the built-in `logging` library to provide detailed logs about the execution. Logs are displayed in the console, including warnings and errors related to missing environment variables or failed API requests.
+Logs are printed to stdout with timestamps and log levels. When running via Docker + crontab they are appended to `/var/log/digest.log`.
 
 ## License
 
