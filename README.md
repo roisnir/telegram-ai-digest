@@ -33,6 +33,7 @@ PHONE_NUMBER=<your_phone_number>
 CHANNEL_USERNAMES=channel_one,channel_two
 TARGET_CHANNEL=-1001234567890
 CLAUDE_API_KEY=<your_claude_api_key>
+TELEGRAPH_TOKEN=<your_telegraph_token>   # see step 4
 ```
 
 ### 3. Authenticate Telegram (first run only)
@@ -45,6 +46,16 @@ python digest.py
 ```
 
 Enter the verification code when prompted. After this, `session.session` is saved and all future runs (including Docker) are non-interactive.
+
+### 4. Get your Telegraph token (first run only)
+
+On the first run without `TELEGRAPH_TOKEN` set, the script creates a Telegraph account and logs the token:
+
+```
+Telegraph account created. Add to .env: TELEGRAPH_TOKEN=<token>
+```
+
+Copy that value into your `.env` file. All subsequent runs (including on the server) will use it from there — no file to manage.
 
 ## How to Obtain API Tokens
 
@@ -69,13 +80,12 @@ docker build -t telegram-ai-digest .
 
 ### Prepare the data directory on your server
 
-Copy these files to a persistent directory on your server (e.g. `/opt/digest/`):
+Copy these files to a persistent directory on your server (e.g. `/opt/telegram-news-digest/`):
 
 ```
-/opt/digest/
-├── .env                   # your environment variables
-├── session.session        # generated during first-run auth above
-└── telegraph_token.txt    # auto-created on first Docker run
+/opt/telegram-news-digest/
+├── .env             # your environment variables (including TELEGRAPH_TOKEN)
+└── session.session  # generated during first-run auth above
 ```
 
 ### Run manually (test)
@@ -84,14 +94,7 @@ Copy these files to a persistent directory on your server (e.g. `/opt/digest/`):
 docker run --rm \
   -v /opt/telegram-news-digest/.env:/app/.env:ro \
   -v /opt/telegram-news-digest/session.session:/app/session.session \
-  -v /opt/telegram-news-digest/telegraph_token.txt:/app/telegraph_token.txt \
   telegram-ai-digest
-```
-
-`telegraph_token.txt` will be created automatically on the first run if it doesn't exist — just ensure the file exists on the host beforehand:
-
-```bash
-touch /opt/telegram-news-digest/telegraph_token.txt
 ```
 
 ## Scheduling with crontab
@@ -99,11 +102,7 @@ touch /opt/telegram-news-digest/telegraph_token.txt
 To run the digest automatically at **07:00** and **19:00** every day, add the following to your server's crontab (`crontab -e`):
 
 ```cron
-0 7,19 * * * docker run --rm \
-  -v /opt/telegram-news-digest/.env:/app/.env:ro \
-  -v /opt/telegram-news-digest/session.session:/app/session.session \
-  -v /opt/telegram-news-digest/telegraph_token.txt:/app/telegraph_token.txt \
-  telegram-ai-digest >> /var/log/digest.log 2>&1
+0 7,19 * * * docker run --rm -v /opt/telegram-news-digest/.env:/app/.env:ro -v /opt/telegram-news-digest/session.session:/app/session.session telegram-ai-digest >> /var/log/digest.log 2>&1
 ```
 
 > **Note:** The times are in the server's local timezone. If your server runs UTC and you want 07:00 and 19:00 Israel time (UTC+3), use `0 4,16 * * *` instead (adjust for DST as needed).

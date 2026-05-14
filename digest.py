@@ -333,13 +333,19 @@ TOKEN_FILE = "telegraph_token.txt"
 def publish_to_telegraph(digest: dict[str, Any], end_date: datetime) -> str:
     from telegraph import Telegraph
 
-    token_path = Path(TOKEN_FILE)
-    if token_path.exists():
-        t = Telegraph(access_token=token_path.read_text().strip())
+    token = os.environ.get("TELEGRAPH_TOKEN", "").strip()
+    if not token:
+        token_path = Path(TOKEN_FILE)
+        if token_path.exists():
+            token = token_path.read_text().strip()
+    if token:
+        t = Telegraph(access_token=token)
     else:
         t = Telegraph()
         t.create_account(short_name="daily-digest", author_name="עדכון יומי")
-        token_path.write_text(t.get_access_token())
+        token = t.get_access_token()
+        Path(TOKEN_FILE).write_text(token)
+        logging.info(f"Telegraph account created. Add to .env: TELEGRAPH_TOKEN={token}")
 
     local = _local_end_date(end_date)
     time_of_day = time_of_day_label(local.hour)
