@@ -99,10 +99,26 @@ docker run --rm \
 
 ## Scheduling with crontab
 
-To run the digest automatically at **07:00** and **19:00** every day, add the following to your server's crontab (`crontab -e`):
+Create a wrapper script at `/opt/telegram-news-digest/run.sh`:
+
+```bash
+#!/bin/bash
+docker run --rm \
+  -v /opt/telegram-news-digest/.env:/app/.env:ro \
+  -v /opt/telegram-news-digest/session.session:/app/session.session \
+  telegram-ai-digest >> /var/log/digest.log 2>&1
+```
+
+Make it executable:
+
+```bash
+chmod +x /opt/telegram-news-digest/run.sh
+```
+
+Then add a single short line to your crontab (`crontab -e`):
 
 ```cron
-0 7,19 * * * docker run --rm -v /opt/telegram-news-digest/.env:/app/.env:ro -v /opt/telegram-news-digest/session.session:/app/session.session telegram-ai-digest >> /var/log/digest.log 2>&1
+0 7,19 * * * /opt/telegram-news-digest/run.sh
 ```
 
 > **Note:** The times are in the server's local timezone. If your server runs UTC and you want 07:00 and 19:00 Israel time (UTC+3), use `0 4,16 * * *` instead (adjust for DST as needed).
