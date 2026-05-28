@@ -60,7 +60,7 @@
       "title": "README: VPS server setup instructions",
       "issue": "https://github.com/roisnir/telegram-ai-digest/issues/6",
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "blockedBy": ["US-002"],
       "acceptanceCriteria": [
         "TELEGRAPH_TOKEN removed from all .env examples in README",

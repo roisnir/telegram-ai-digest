@@ -47,3 +47,27 @@
 - The `--dry-run` flag name becomes `args.dry_run` in argparse (dashes become underscores)
 
 ---
+
+## 2026-05-29 - US-003 - README: VPS server setup instructions
+
+### What was implemented
+- Removed all Telegraph, Instant View, and `telegraph_token` references from README
+- Updated feature list: describes self-hosted HTML page output instead of Telegraph
+- Updated `.env` example: removed `TELEGRAPH_TOKEN`, added `HTML_OUTPUT_DIR` and `PUBLIC_BASE_URL` with example values
+- Removed "Get your Telegraph token" step 4 entirely
+- Added **Web Server Setup** section covering two options:
+  - nginx: static-file `location /` block with `root`, `try_files`; reload command
+  - Python `http.server`: one-liner for quick testing
+- Updated Docker run examples to mount `HTML_OUTPUT_DIR` as a volume (both manual test run and cron wrapper script)
+- Documented `--dry-run` flag under Usage: explains it generates HTML and logs the path but skips `send_message`
+
+### Files changed
+- `README.md`: full rewrite removing Telegraph references, adding web server setup, documenting `--dry-run`, updating `.env` examples and Docker volume mounts
+
+### Learnings
+- All Telegraph-related content (token, Instant View, publish step) must be removed from every section including the `.env` example, the deployment data-directory listing, and the "done when" narrative in Usage
+- The Docker volume mount for `HTML_OUTPUT_DIR` must appear in BOTH the manual test run example AND the cron wrapper script — easy to miss the cron script
+- `--dry-run` docs belong in the Usage section close to the normal run command so users discover the flag naturally
+- nginx `try_files $uri $uri/ =404` is the idiomatic pattern for static file serving; Python http.server is good for quick local testing but should not be recommended for production
+
+---
