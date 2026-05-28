@@ -12,7 +12,7 @@
       "title": "Media-aware fetch + source map",
       "issue": "https://github.com/roisnir/telegram-ai-digest/issues/4",
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "blockedBy": [],
       "acceptanceCriteria": [
         "extract_media_info(message) returns ('video', duration_sec) for video messages, ('photo', None) for photos, ('document', None) for other documents, (None, None) for text-only",

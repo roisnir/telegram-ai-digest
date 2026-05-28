@@ -1,6 +1,7 @@
 import json
 import pytest
 from datetime import datetime
+from unittest.mock import Mock
 from pytz import UTC, timezone
 
 from digest import (
@@ -11,8 +12,27 @@ from digest import (
     _meta_text,
     _deep_item_node,
     _section_nodes,
+    extract_media_info,
+    extract_external_links,
     LOCAL_TZ,
 )
+
+
+# ---------------------------------------------------------------------------
+# Minimal stub classes that mimic Telethon entity types by name
+# ---------------------------------------------------------------------------
+
+class MessageEntityUrl:
+    def __init__(self, offset, length):
+        self.offset = offset
+        self.length = length
+
+
+class MessageEntityTextUrl:
+    def __init__(self, offset, length, url):
+        self.offset = offset
+        self.length = length
+        self.url = url
 
 # 07:00 Israel = 04:00 UTC in summer (UTC+3), 05:00 UTC in winter (UTC+2)
 # Use aware datetimes in Israel timezone directly to avoid DST ambiguity in tests.
@@ -327,3 +347,116 @@ class TestFormatTelegramMessage:
         digest = {"big_news": [{"headline": "", "links": [], "source": "@ch", "time": "07:00", "section": "conflict"}]}
         msg = format_telegram_message(digest, MORNING_IL, self.URL)
         assert "⚔️" not in msg
+
+
+# ---------------------------------------------------------------------------
+# extract_media_info
+# ---------------------------------------------------------------------------
+
+class TestExtractMediaInfo:
+    def _msg(self, video=None, photo=None, document=None, file_duration=None):
+        msg = Mock()
+        msg.video = video
+        msg.photo = photo
+        msg.document = document
+        msg.file = Mock()
+        msg.file.duration = file_duration
+        return msg
+
+    def test_video_returns_video_type(self):
+        msg = self._msg(video=object(), file_duration=90)
+        media_type, duration = extract_media_info(msg)
+        assert media_type == 'video'
+
+    def test_video_returns_duration_seconds(self):
+        msg = self._msg(video=object(), file_duration=90)
+        _, duration = extract_media_info(msg)
+        assert duration == 90
+
+    def test_photo_returns_photo_type(self):
+        msg = self._msg(photo=object())
+        media_type, duration = extract_media_info(msg)
+        assert media_type == 'photo'
+        assert duration is None
+
+    def test_document_returns_document_type(self):
+        msg = self._msg(document=object())
+        media_type, duration = extract_media_info(msg)
+        assert media_type == 'document'
+        assert duration is None
+
+    def test_text_only_returns_none_none(self):
+        msg = self._msg()
+        assert extract_media_info(msg) == (None, None)
+
+    def test_video_without_duration_returns_none_duration(self):
+        msg = self._msg(video=object(), file_duration=None)
+        media_type, duration = extract_media_info(msg)
+        assert media_type == 'video'
+        assert duration is None
+
+
+# ---------------------------------------------------------------------------
+# extract_external_links
+# ---------------------------------------------------------------------------
+
+class TestExtractExternalLinks:
+    def _msg(self, text="", entities=None):
+        msg = Mock()
+        msg.text = text
+        msg.entities = entities
+        return msg
+
+    def test_none_entities_returns_empty(self):
+        assert extract_external_links(self._msg(entities=None)) == []
+
+    def test_empty_entities_returns_empty(self):
+        assert extract_external_links(self._msg(entities=[])) == []
+
+    def test_text_url_entity_extracted(self):
+        text = "visit https://example.com today"
+        entities = [MessageEntityUrl(offset=6, length=19)]
+        links = extract_external_links(self._msg(text=text, entities=entities))
+        assert links == ["https://example.com"]
+
+    def test_text_url_entity_with_tme_filtered_out(self):
+        text = "see https://t.me/channel/123 for info"
+        entities = [MessageEntityUrl(offset=4, length=24)]
+        links = extract_external_links(self._msg(text=text, entities=entities))
+        assert links == []
+
+    def test_hyperlink_entity_extracted(self):
+        entities = [MessageEntityTextUrl(offset=0, length=4, url="https://example.com")]
+        links = extract_external_links(self._msg(text="link", entities=entities))
+        assert links == ["https://example.com"]
+
+    def test_hyperlink_tme_filtered_out(self):
+        entities = [MessageEntityTextUrl(offset=0, length=4, url="https://t.me/ch/1")]
+        links = extract_external_links(self._msg(text="link", entities=entities))
+        assert links == []
+
+    def test_duplicate_urls_deduplicated(self):
+        text = "https://example.com https://example.com"
+        entities = [
+            MessageEntityUrl(offset=0, length=19),
+            MessageEntityUrl(offset=20, length=19),
+        ]
+        links = extract_external_links(self._msg(text=text, entities=entities))
+        assert links == ["https://example.com"]
+
+    def test_order_of_first_appearance_preserved(self):
+        entities = [
+            MessageEntityTextUrl(offset=0, length=1, url="https://first.com"),
+            MessageEntityTextUrl(offset=2, length=1, url="https://second.com"),
+        ]
+        links = extract_external_links(self._msg(text="a b", entities=entities))
+        assert links == ["https://first.com", "https://second.com"]
+
+    def test_non_url_entities_ignored(self):
+        class MessageEntityBold:
+            def __init__(self, offset, length):
+                self.offset = offset
+                self.length = length
+        entities = [MessageEntityBold(offset=0, length=5)]
+        links = extract_external_links(self._msg(text="hello", entities=entities))
+        assert links == []

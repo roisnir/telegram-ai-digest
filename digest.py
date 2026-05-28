@@ -360,23 +360,83 @@ def publish_to_telegraph(digest: dict[str, Any], end_date: datetime) -> str:
 # Telegram helpers
 # ---------------------------------------------------------------------------
 
-async def fetch_messages(channel_username: str, start_date: datetime, end_date: datetime) -> list[str]:
-    messages: list[str] = []
+def _format_duration(seconds: int | None) -> str:
+    if seconds is None:
+        return "?:??"
+    return f"{seconds // 60}:{seconds % 60:02d}"
+
+
+def extract_media_info(message) -> tuple[str | None, int | None]:
+    if getattr(message, 'video', None) is not None:
+        file_obj = getattr(message, 'file', None)
+        duration = getattr(file_obj, 'duration', None) if file_obj is not None else None
+        return ('video', duration)
+    if getattr(message, 'photo', None) is not None:
+        return ('photo', None)
+    if getattr(message, 'document', None) is not None:
+        return ('document', None)
+    return (None, None)
+
+
+def extract_external_links(message) -> list[str]:
+    entities = getattr(message, 'entities', None)
+    if not entities:
+        return []
+    text = getattr(message, 'text', '') or ''
+    seen: set[str] = set()
+    links: list[str] = []
+    for entity in entities:
+        entity_type = type(entity).__name__
+        url: str | None = None
+        if entity_type == 'MessageEntityTextUrl':
+            url = getattr(entity, 'url', None)
+        elif entity_type == 'MessageEntityUrl':
+            offset = getattr(entity, 'offset', 0)
+            length = getattr(entity, 'length', 0)
+            url = text[offset:offset + length]
+        if url and 't.me' not in url and url not in seen:
+            seen.add(url)
+            links.append(url)
+    return links
+
+
+async def fetch_messages(channel_username: str, start_date: datetime, end_date: datetime) -> tuple[list[str], dict]:
+    message_strings: list[str] = []
+    source_map: dict = {}
     try:
         channel = await client.get_entity(channel_username)
         logging.info(f"Fetching from: {channel.title} (@{channel_username})")
         async for message in client.iter_messages(channel, offset_date=end_date, limit=None):
             if message.date < start_date:
                 break
-            if message.text and start_date <= message.date <= end_date:
-                link = f"https://t.me/{channel_username}/{message.id}"
-                local_time = message.date.astimezone(LOCAL_TZ).strftime('%H:%M')
-                messages.append(f"[{local_time}] {message.text}\nLink: {link}")
-        messages.reverse()
-        logging.info(f"Fetched {len(messages)} messages from @{channel_username}")
+            if not (start_date <= message.date <= end_date):
+                continue
+            media_type, video_duration = extract_media_info(message)
+            text = message.text or ""
+            if not text and media_type is None:
+                continue
+            link = f"https://t.me/{channel_username}/{message.id}"
+            local_time = message.date.astimezone(LOCAL_TZ).strftime('%H:%M')
+            if media_type == 'video':
+                content = text if text else "[סרטון]"
+                msg_str = f"[{local_time}] [VIDEO: {_format_duration(video_duration)}] {content}\nLink: {link}"
+            elif media_type == 'photo':
+                content = text if text else "[תמונה]"
+                msg_str = f"[{local_time}] [IMAGE] {content}\nLink: {link}"
+            else:
+                msg_str = f"[{local_time}] {text}\nLink: {link}"
+            message_strings.append(msg_str)
+            source_map[link] = {
+                "text": text,
+                "media_type": media_type,
+                "video_duration": video_duration,
+                "external_links": extract_external_links(message),
+            }
+        message_strings.reverse()
+        logging.info(f"Fetched {len(message_strings)} messages from @{channel_username}")
     except Exception as e:
         logging.error(f"Error fetching from @{channel_username}: {e}")
-    return messages
+    return message_strings, source_map
 
 
 # ---------------------------------------------------------------------------
@@ -412,10 +472,12 @@ async def main() -> None:
     logging.info("Connected to Telegram")
 
     messages_by_channel: dict[str, list[str]] = {}
+    source_map: dict = {}
     for username in CHANNEL_USERNAMES:
-        msgs = await fetch_messages(username, start_date, end_date)
+        msgs, channel_source_map = await fetch_messages(username, start_date, end_date)
         if msgs:
             messages_by_channel[username] = msgs
+        source_map.update(channel_source_map)
 
     if not messages_by_channel:
         logging.error("No messages fetched from any channel.")

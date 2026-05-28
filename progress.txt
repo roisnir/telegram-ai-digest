@@ -1,0 +1,21 @@
+
+## 2026-05-29 - US-001 - Media-aware fetch + source map
+
+### What was implemented
+- Added `extract_media_info(message)` pure function: returns `('video', duration_sec)`, `('photo', None)`, `('document', None)`, or `(None, None)` using duck-typed attribute access (`message.video`, `message.photo`, `message.document`, `message.file.duration`)
+- Added `extract_external_links(message)` pure function: filters non-t.me URLs from entities; handles `MessageEntityUrl` (URL embedded in text at offset/length) and `MessageEntityTextUrl` (URL in `.url` attribute); deduplicates preserving first-appearance order
+- Added `_format_duration(seconds)` helper producing `M:SS` format
+- Updated `fetch_messages` to return `tuple[list[str], dict]`; video-only and image-only messages are no longer silently dropped; each message is formatted with `[VIDEO: M:SS]`/`[IMAGE]` prefix; source_map keyed by t.me permalink
+- Updated `main()` to unpack the tuple and accumulate `source_map` across all channels
+
+### Files changed
+- `digest.py`: new functions + updated `fetch_messages` + updated `main()`
+- `test_digest.py`: added `TestExtractMediaInfo` (6 tests) and `TestExtractExternalLinks` (9 tests); stub entity classes used for isinstance-avoidance
+
+### Learnings
+- Telethon message properties (`message.video`, `message.photo`, `message.document`) are the cleanest way to detect media type — avoids raw `isinstance` against internal Telethon TL types
+- Using `type(entity).__name__` for entity dispatch lets tests run with simple stub classes (no telethon import required in tests), while still matching real Telethon object names at runtime
+- Messages with neither text nor media are skipped; photo/video without caption produce Hebrew placeholder labels `[תמונה]`/`[סרטון]`
+- `source_map` is accumulated per-channel via `dict.update()`; key collisions cannot happen because t.me permalinks include the channel username
+
+---
