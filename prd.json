@@ -1,0 +1,77 @@
+{
+  "branchName": "feature/html-digest",
+  "description": "Telegram AI Digest — fetches messages from Telegram channels via Telethon, summarises them with Claude, and publishes a self-hosted HTML digest page. The page URL is sent to a private Telegram channel. Entry point: python digest.py. Tests: python -m pytest test_digest.py -v.",
+  "testingPolicy": {
+    "rule": "Any story touching fetch_messages, build_html_page, or extract_* functions requires BOTH (a) unit tests green AND (b) python digest.py --dry-run run on the production machine with the output HTML manually inspected before passes may be set to true.",
+    "rationale": "Unit tests verify code paths but cannot catch layout issues, missing media labels, or broken RTL rendering in the actual browser output.",
+    "checklist": "Before setting passes:true, tick off each acceptance criterion against the rendered HTML file and record confirmation in the story's notes field."
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Media-aware fetch + source map",
+      "issue": "https://github.com/roisnir/telegram-ai-digest/issues/4",
+      "priority": 1,
+      "passes": false,
+      "blockedBy": [],
+      "acceptanceCriteria": [
+        "extract_media_info(message) returns ('video', duration_sec) for video messages, ('photo', None) for photos, ('document', None) for other documents, (None, None) for text-only",
+        "extract_external_links(message) returns only non-t.me URLs from message.entities; handles None entities; handles MessageEntityUrl and MessageEntityTextUrl; preserves order of first appearance",
+        "fetch_messages returns a tuple (message_strings, source_map) — message_strings for Claude, source_map dict keyed by t.me permalink",
+        "Video-only messages are no longer silently dropped — they appear in the Claude input with [VIDEO: M:SS] [סרטון]",
+        "Video + caption messages appear with [VIDEO: M:SS] {caption}",
+        "Image-only messages appear with [IMAGE] [תמונה]",
+        "Image + caption messages appear with [IMAGE] {caption}",
+        "Each source_map entry contains: text (str), media_type (str|None), video_duration (int|None), external_links (list[str])",
+        "main() accumulates source_map across all channels into a single dict",
+        "All tests pass: python -m pytest test_digest.py -v"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "HTML digest page + dry-run",
+      "issue": "https://github.com/roisnir/telegram-ai-digest/issues/5",
+      "priority": 2,
+      "passes": false,
+      "blockedBy": ["US-001"],
+      "acceptanceCriteria": [
+        "build_html_page(digest, source_map, end_date) is a pure function — no file I/O, no network calls — returning a complete self-contained HTML string",
+        "Page is <!DOCTYPE html> with lang='he' dir='rtl' and all CSS inlined (no external dependencies)",
+        "Four sections rendered in order: conflict, politics, world, deep — empty sections omitted",
+        "Big news items have: h4 heading, meta line (channel + time), AI summary paragraph, קישור למקור link, and a <details>/<summary> source bubble",
+        "Minor news items are a <ul> where each <li> is a <details> element — summary is the headline, expanded content is the source bubble",
+        "Source bubbles are collapsed by default",
+        "Source bubble shows: channel name (bold), timestamp, original message text, 📹 M:SS label for video or 🖼 label for image, and a פתח בטלגרם link to the t.me permalink",
+        "External link from source_map entry used as קישור למקור when present; t.me link used as fallback when not",
+        "When a digest item has multiple links (merged messages), one bubble is rendered per link",
+        "Telegraph code fully removed: publish_to_telegraph, TOKEN_FILE, Telegraph import, telegraph from requirements.txt",
+        "--dry-run argparse flag added: generates HTML, saves to HTML_OUTPUT_DIR, logs path, skips send_message",
+        "HTML_OUTPUT_DIR and PUBLIC_BASE_URL read from .env (required)",
+        "HTML filename pattern: digest-YYYY-MM-DD-HHMM.html (local time from end_date)",
+        "Public URL returned: PUBLIC_BASE_URL/digest-YYYY-MM-DD-HHMM.html",
+        "All tests pass: python -m pytest test_digest.py -v",
+        "python digest.py --dry-run runs on the production machine and the output HTML is manually inspected in a browser"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "README: VPS server setup instructions",
+      "issue": "https://github.com/roisnir/telegram-ai-digest/issues/6",
+      "priority": 3,
+      "passes": false,
+      "blockedBy": ["US-002"],
+      "acceptanceCriteria": [
+        "TELEGRAPH_TOKEN removed from all .env examples in README",
+        "HTML_OUTPUT_DIR and PUBLIC_BASE_URL documented in the .env setup section with example values",
+        "Web server setup section added covering nginx (static-file location block) and Python http.server as options",
+        "--dry-run flag documented under Usage: what it does and when to use it",
+        "Docker run example updated to mount HTML_OUTPUT_DIR as a volume",
+        "No references to Telegraph, Instant View, or telegraph_token remain in README",
+        "Feature list updated to describe HTML page output instead of Telegraph"
+      ],
+      "notes": ""
+    }
+  ]
+}

@@ -159,3 +159,17 @@ telegraph
 - The page URL is sent as a plain message to the Telegram channel
 - Opening the URL in Telegram triggers Instant View
 - `telegraph_token.txt` is created on first run and reused on subsequent runs
+
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked in GitHub Issues (`github.com/roisnir/telegram-ai-digest`). See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Uses the default label vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
