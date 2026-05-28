@@ -19,3 +19,31 @@
 - `source_map` is accumulated per-channel via `dict.update()`; key collisions cannot happen because t.me permalinks include the channel username
 
 ---
+
+## 2026-05-29 - US-002 - HTML digest page + dry-run
+
+### What was implemented
+- Added `build_html_page(digest, source_map, end_date)` pure function returning a complete self-contained HTML string with `<!DOCTYPE html>`, `lang="he" dir="rtl"`, and all CSS inlined
+- Sections rendered in order: conflict → politics → world → deep; empty sections omitted
+- Big news items rendered as `<article>` with h4 heading, meta line, summary paragraph, `קישור למקור` link (external from source_map if available, t.me fallback), and one `<details>` source bubble per link
+- Minor news items rendered as `<ul class="minor-news">` where each `<li>` is a `<details>` element (summary = headline, expanded = source bubble)
+- Source bubbles show: channel name (bold, extracted from t.me URL), timestamp, original message text, 📹 M:SS or 🖼 media label, and פתח בטלגרם link
+- Removed `publish_to_telegraph`, `TOKEN_FILE`, Telegraph import; removed `telegraph` from requirements.txt
+- Added `--dry-run` argparse flag: generates HTML, saves to `HTML_OUTPUT_DIR`, logs path, skips `send_message`
+- Added `HTML_OUTPUT_DIR` and `PUBLIC_BASE_URL` as required env variables; HTML filename pattern: `digest-YYYY-MM-DD-HHMM.html`
+- Added 21 tests in `TestBuildHtmlPage`; all 95 tests pass
+
+### Files changed
+- `digest.py`: removed Telegraph code, added `_HTML_CSS`, `_esc`, `_primary_href`, `_channel_from_link`, `_source_bubble_content`, `_big_item_html`, `_minor_item_html`, `_SECTION_ORDER_HTML`, `build_html_page`; updated `main()` for `--dry-run` and HTML file output
+- `requirements.txt`: removed `telegraph`
+- `conftest.py`: added `HTML_OUTPUT_DIR` and `PUBLIC_BASE_URL` defaults
+- `test_digest.py`: added `build_html_page` import and `TestBuildHtmlPage` class
+
+### Learnings
+- `import html` (stdlib) provides `html.escape()` for safe HTML generation; name it carefully to avoid shadowing by local variables
+- Channel name can be reliably extracted from t.me URLs by splitting on `/` — `parts[3]` after `https://t.me/`
+- `_primary_href` should iterate over all links and return the first external link found across all source_map entries, not just the first link's external links — this handles merged messages where the primary link might lack external links
+- `conftest.py` is the right place for new required env var defaults so tests don't need a real `.env` at import time
+- The `--dry-run` flag name becomes `args.dry_run` in argparse (dashes become underscores)
+
+---

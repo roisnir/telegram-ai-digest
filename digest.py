@@ -1,4 +1,5 @@
 import os
+import html
 import asyncio
 import json
 import logging
@@ -46,6 +47,8 @@ try:
     CHANNEL_USERNAMES = [c.strip() for c in get_env_variable('CHANNEL_USERNAMES').split(',')]
     CLAUDE_API_KEY = get_env_variable('CLAUDE_API_KEY')
     TARGET_CHANNEL = get_env_variable('TARGET_CHANNEL')
+    HTML_OUTPUT_DIR = get_env_variable('HTML_OUTPUT_DIR')
+    PUBLIC_BASE_URL = get_env_variable('PUBLIC_BASE_URL').rstrip('/')
 except ValueError as e:
     logging.error(f"Environment variable error: {str(e)}")
     raise
@@ -324,36 +327,149 @@ async def create_digest(
 
 
 # ---------------------------------------------------------------------------
-# Telegraph publishing
+# HTML page builder
 # ---------------------------------------------------------------------------
 
-TOKEN_FILE = "telegraph_token.txt"
+_HTML_CSS = """
+* { box-sizing: border-box; }
+body { font-family: Arial, 'Helvetica Neue', sans-serif; direction: rtl; margin: 0; padding: 0; background: #f5f5f5; color: #222; line-height: 1.6; }
+header { background: #1a1a2e; color: white; padding: 1rem 2rem; }
+header h1 { margin: 0; font-size: 1.5rem; }
+.date-range { margin: 0.25rem 0 0; opacity: 0.8; font-size: 0.9rem; }
+main { max-width: 800px; margin: 0 auto; padding: 1rem 1.5rem; }
+section { margin-bottom: 2rem; }
+section h2 { border-bottom: 2px solid #1a1a2e; padding-bottom: 0.4rem; font-size: 1.3rem; }
+article { background: white; border-radius: 8px; padding: 1rem 1.25rem; margin-bottom: 1rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+article h4 { margin: 0 0 0.3rem; font-size: 1.05rem; }
+.meta { color: #666; font-size: 0.85rem; margin: 0 0 0.5rem; }
+details { margin-top: 0.5rem; }
+summary { cursor: pointer; color: #555; font-size: 0.85rem; padding: 0.2rem 0.5rem; background: #f0f0f0; border-radius: 4px; display: inline-block; }
+summary:hover { background: #e0e0e0; }
+.source-bubble { background: #fafafa; border: 1px solid #ddd; border-radius: 4px; padding: 0.75rem; margin-top: 0.5rem; font-size: 0.85rem; }
+.bubble-meta { margin: 0 0 0.3rem; }
+.bubble-text { margin: 0.3rem 0; white-space: pre-wrap; word-wrap: break-word; }
+.bubble-media { color: #555; margin: 0.3rem 0; }
+.bubble-tme { color: #0088cc; font-size: 0.8rem; }
+ul.minor-news { list-style: none; padding: 0; margin: 0; }
+ul.minor-news li { margin-bottom: 0.4rem; padding: 0.5rem 0.75rem; background: white; border-radius: 6px; }
+ul.minor-news li > details > summary { cursor: pointer; font-size: 0.95rem; color: #222; background: none; padding: 0; display: block; }
+""".strip()
 
 
-def publish_to_telegraph(digest: dict[str, Any], end_date: datetime) -> str:
-    from telegraph import Telegraph
+def _esc(s) -> str:
+    return html.escape(str(s)) if s is not None else ""
 
-    token = os.environ.get("TELEGRAPH_TOKEN", "").strip()
-    if not token:
-        token_path = Path(TOKEN_FILE)
-        if token_path.exists():
-            token = token_path.read_text().strip()
-    if token:
-        t = Telegraph(access_token=token)
+
+def _primary_href(links: list, source_map: dict) -> str:
+    for link in links:
+        ext = source_map.get(link, {}).get("external_links", [])
+        if ext:
+            return ext[0]
+    return links[0] if links else "#"
+
+
+def _channel_from_link(link: str) -> str:
+    parts = link.split("/")
+    if len(parts) >= 4 and "t.me" in parts[2]:
+        return f"@{parts[3]}"
+    return ""
+
+
+def _source_bubble_content(link: str, source_map: dict, time: str = "") -> str:
+    entry = source_map.get(link, {})
+    text = entry.get("text") or ""
+    media_type = entry.get("media_type")
+    video_duration = entry.get("video_duration")
+    channel = _channel_from_link(link)
+
+    meta_parts = []
+    if channel:
+        meta_parts.append(f"<strong>{_esc(channel)}</strong>")
+    if time:
+        meta_parts.append(_esc(time))
+    meta_html = f'<p class="bubble-meta">{" | ".join(meta_parts)}</p>' if meta_parts else ""
+
+    text_html = f'<p class="bubble-text">{_esc(text)}</p>' if text else ""
+
+    if media_type == "video":
+        media_html = f'<p class="bubble-media">📹 {_esc(_format_duration(video_duration))}</p>'
+    elif media_type in ("photo", "document"):
+        media_html = '<p class="bubble-media">🖼</p>'
     else:
-        t = Telegraph()
-        t.create_account(short_name="daily-digest", author_name="עדכון יומי")
-        token = t.get_access_token()
-        Path(TOKEN_FILE).write_text(token)
-        logging.info(f"Telegraph account created. Add to .env: TELEGRAPH_TOKEN={token}")
+        media_html = ""
 
-    local = _local_end_date(end_date)
-    time_of_day = time_of_day_label(local.hour)
-    time_str = local.strftime('%H:%M')
-    title = f"עדכון {time_of_day} לשעה {time_str} — {digest['date_range']}"
-    content = build_telegraph_content(digest)
-    page = t.create_page(title=title, content=content, author_name="עדכון יומי")
-    return page['url']
+    tme_link = f'<a href="{_esc(link)}" class="bubble-tme">פתח בטלגרם</a>'
+    return f'<div class="source-bubble">{meta_html}{text_html}{media_html}{tme_link}</div>'
+
+
+def _big_item_html(item: dict, source_map: dict) -> str:
+    headline = _esc(item.get("headline", ""))
+    summary = _esc(item.get("summary", ""))
+    source = _esc(item.get("source", ""))
+    time = item.get("time", "")
+    links = item.get("links", [])
+
+    meta_parts = [p for p in (source, _esc(time)) if p]
+    meta_html = f'<p class="meta"><em>{" | ".join(meta_parts)}</em></p>' if meta_parts else ""
+    summary_html = f'<p>{summary}</p>' if summary else ""
+
+    primary_href = _primary_href(links, source_map)
+    link_html = f'<p><a href="{_esc(primary_href)}">קישור למקור</a></p>' if links else ""
+
+    bubbles_html = ""
+    for i, link in enumerate(links):
+        label = "מקור" if len(links) == 1 else f"מקור {i + 1}"
+        content = _source_bubble_content(link, source_map, time)
+        bubbles_html += f'<details><summary>{label}</summary>{content}</details>\n'
+
+    return f'<article>\n<h4>{headline}</h4>\n{meta_html}{summary_html}{link_html}{bubbles_html}</article>\n'
+
+
+def _minor_item_html(item: dict, source_map: dict) -> str:
+    headline = _esc(item.get("headline", ""))
+    links = item.get("links", [])
+    time = item.get("time", "")
+    bubbles_html = "".join(_source_bubble_content(link, source_map, time) for link in links)
+    return f'<li><details><summary>{headline}</summary>{bubbles_html}</details></li>\n'
+
+
+_SECTION_ORDER_HTML: list[tuple[str, str]] = [
+    ("conflict", "עדכוני לחימה והסכסוך"),
+    ("politics", "פוליטיקה ישראלית"),
+    ("world", "כותרות נוספות"),
+    ("deep", "לקריאה נוספת"),
+]
+
+
+def build_html_page(digest: dict[str, Any], source_map: dict, end_date: datetime) -> str:
+    date_range = _esc(digest.get("date_range", ""))
+    sections_html = ""
+    for section_key, label in _SECTION_ORDER_HTML:
+        big = [i for i in digest.get("big_news", []) if i.get("section") == section_key]
+        minor = [i for i in digest.get("minor_news", []) if i.get("section") == section_key]
+        if not big and not minor:
+            continue
+        inner = "".join(_big_item_html(item, source_map) for item in big)
+        if minor:
+            minor_li = "".join(_minor_item_html(item, source_map) for item in minor)
+            inner += f'<ul class="minor-news">\n{minor_li}</ul>\n'
+        sections_html += f'<section>\n<h2>{_esc(label)}</h2>\n{inner}</section>\n'
+
+    return (
+        f'<!DOCTYPE html>\n'
+        f'<html lang="he" dir="rtl">\n'
+        f'<head>\n'
+        f'<meta charset="UTF-8">\n'
+        f'<meta name="viewport" content="width=device-width, initial-scale=1.0">\n'
+        f'<title>דיג\'סט יומי — {date_range}</title>\n'
+        f'<style>\n{_HTML_CSS}\n</style>\n'
+        f'</head>\n'
+        f'<body>\n'
+        f'<header>\n<h1>דיג\'סט יומי</h1>\n<p class="date-range">{date_range}</p>\n</header>\n'
+        f'<main>\n{sections_html}</main>\n'
+        f'</body>\n'
+        f'</html>'
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -444,9 +560,10 @@ async def fetch_messages(channel_username: str, start_date: datetime, end_date: 
 # ---------------------------------------------------------------------------
 
 async def main() -> None:
-    parser = argparse.ArgumentParser(description='Generate daily Telegram news update as Telegraph page.')
+    parser = argparse.ArgumentParser(description='Generate daily Telegram news update as HTML page.')
     parser.add_argument('--startdate', type=str, help='Start datetime YYYY-MM-DD or YYYY-MM-DD HH:MM (UTC)')
     parser.add_argument('--enddate', type=str, help='End datetime YYYY-MM-DD or YYYY-MM-DD HH:MM (UTC)')
+    parser.add_argument('--dry-run', action='store_true', help='Generate HTML only, skip sending Telegram message')
     args = parser.parse_args()
 
     def parse_dt(s: str) -> datetime:
@@ -492,12 +609,19 @@ async def main() -> None:
         await client.disconnect()
         return
 
-    page_url = publish_to_telegraph(digest, end_date)
-    logging.info(f"Telegraph page: {page_url}")
+    html_content = build_html_page(digest, source_map, end_date)
+    local = end_date.astimezone(LOCAL_TZ)
+    filename = f"digest-{local.strftime('%Y-%m-%d-%H%M')}.html"
+    html_path = Path(HTML_OUTPUT_DIR) / filename
+    html_path.parent.mkdir(parents=True, exist_ok=True)
+    html_path.write_text(html_content, encoding='utf-8')
+    logging.info(f"HTML digest saved: {html_path}")
+    page_url = f"{PUBLIC_BASE_URL}/{filename}"
 
-    target = int(TARGET_CHANNEL) if TARGET_CHANNEL.lstrip('-').isdigit() else TARGET_CHANNEL
-    message = format_telegram_message(digest, end_date, page_url)
-    await client.send_message(target, message, parse_mode='html')
+    if not args.dry_run:
+        target = int(TARGET_CHANNEL) if TARGET_CHANNEL.lstrip('-').isdigit() else TARGET_CHANNEL
+        message = format_telegram_message(digest, end_date, page_url)
+        await client.send_message(target, message, parse_mode='html')
 
     await client.disconnect()
 

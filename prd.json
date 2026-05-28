@@ -33,7 +33,7 @@
       "title": "HTML digest page + dry-run",
       "issue": "https://github.com/roisnir/telegram-ai-digest/issues/5",
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "blockedBy": ["US-001"],
       "acceptanceCriteria": [
         "build_html_page(digest, source_map, end_date) is a pure function — no file I/O, no network calls — returning a complete self-contained HTML string",

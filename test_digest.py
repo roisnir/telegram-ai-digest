@@ -9,6 +9,7 @@ from digest import (
     time_of_day_label,
     format_telegram_message,
     build_telegraph_content,
+    build_html_page,
     _meta_text,
     _deep_item_node,
     _section_nodes,
@@ -460,3 +461,176 @@ class TestExtractExternalLinks:
         entities = [MessageEntityBold(offset=0, length=5)]
         links = extract_external_links(self._msg(text="hello", entities=entities))
         assert links == []
+
+
+# ---------------------------------------------------------------------------
+# build_html_page
+# ---------------------------------------------------------------------------
+
+class TestBuildHtmlPage:
+    END_DATE = datetime(2026, 5, 13, 7, 0, tzinfo=LOCAL_TZ)
+
+    DIGEST = {
+        "date_range": "2026-05-13",
+        "big_news": [
+            {
+                "headline": "כותרת גדולה",
+                "summary": "סיכום חשוב",
+                "links": ["https://t.me/ch/100"],
+                "section": "conflict",
+                "source": "@ch",
+                "time": "06:00",
+            }
+        ],
+        "minor_news": [
+            {
+                "headline": "כותרת קטנה",
+                "links": ["https://t.me/ch/200"],
+                "section": "politics",
+                "source": "@ch",
+                "time": "05:00",
+            }
+        ],
+    }
+
+    SOURCE_MAP = {
+        "https://t.me/ch/100": {
+            "text": "טקסט מקורי",
+            "media_type": None,
+            "video_duration": None,
+            "external_links": ["https://ynet.co.il/article"],
+        },
+        "https://t.me/ch/200": {
+            "text": "טקסט קטן",
+            "media_type": "photo",
+            "video_duration": None,
+            "external_links": [],
+        },
+    }
+
+    def _build(self, digest=None, source_map=None):
+        return build_html_page(
+            digest if digest is not None else self.DIGEST,
+            source_map if source_map is not None else self.SOURCE_MAP,
+            self.END_DATE,
+        )
+
+    def test_returns_doctype_html(self):
+        assert self._build().startswith("<!DOCTYPE html>")
+
+    def test_lang_he_dir_rtl(self):
+        page = self._build()
+        assert 'lang="he"' in page
+        assert 'dir="rtl"' in page
+
+    def test_no_external_css_links(self):
+        assert "<link" not in self._build()
+
+    def test_style_tag_present(self):
+        assert "<style>" in self._build()
+
+    def test_conflict_section_present(self):
+        assert "עדכוני לחימה והסכסוך" in self._build()
+
+    def test_politics_section_present(self):
+        assert "פוליטיקה ישראלית" in self._build()
+
+    def test_world_section_omitted_when_empty(self):
+        assert "כותרות נוספות" not in self._build()
+
+    def test_big_news_headline_as_h4(self):
+        assert "<h4>כותרת גדולה</h4>" in self._build()
+
+    def test_big_news_summary_paragraph(self):
+        assert "סיכום חשוב" in self._build()
+
+    def test_big_news_primary_link_uses_external(self):
+        assert 'href="https://ynet.co.il/article"' in self._build()
+
+    def test_big_news_tme_fallback_when_no_external(self):
+        source_map = {
+            "https://t.me/ch/100": {
+                "text": "טקסט",
+                "media_type": None,
+                "video_duration": None,
+                "external_links": [],
+            },
+            "https://t.me/ch/200": self.SOURCE_MAP["https://t.me/ch/200"],
+        }
+        page = self._build(source_map=source_map)
+        assert 'href="https://t.me/ch/100"' in page
+
+    def test_source_bubble_is_details_element(self):
+        assert "<details>" in self._build()
+
+    def test_source_bubble_has_channel_name(self):
+        assert "@ch" in self._build()
+
+    def test_source_bubble_has_tme_link(self):
+        assert "פתח בטלגרם" in self._build()
+
+    def test_source_bubble_has_original_text(self):
+        assert "טקסט מקורי" in self._build()
+
+    def test_source_bubble_photo_media_label(self):
+        assert "🖼" in self._build()
+
+    def test_source_bubble_video_media_label(self):
+        source_map = {
+            "https://t.me/ch/100": {
+                "text": "סרטון",
+                "media_type": "video",
+                "video_duration": 90,
+                "external_links": [],
+            },
+            "https://t.me/ch/200": self.SOURCE_MAP["https://t.me/ch/200"],
+        }
+        page = self._build(source_map=source_map)
+        assert "📹" in page
+        assert "1:30" in page
+
+    def test_minor_news_uses_ul(self):
+        assert "<ul" in self._build()
+
+    def test_minor_news_li_is_details(self):
+        assert "<li><details>" in self._build()
+
+    def test_multiple_links_produce_multiple_bubbles(self):
+        digest = {
+            "date_range": "2026-05-13",
+            "big_news": [
+                {
+                    "headline": "כותרת",
+                    "summary": "סיכום",
+                    "links": ["https://t.me/ch/100", "https://t.me/ch2/200"],
+                    "section": "conflict",
+                    "source": "@ch",
+                    "time": "06:00",
+                }
+            ],
+            "minor_news": [],
+        }
+        source_map = {
+            "https://t.me/ch/100": {"text": "א", "media_type": None, "video_duration": None, "external_links": []},
+            "https://t.me/ch2/200": {"text": "ב", "media_type": None, "video_duration": None, "external_links": []},
+        }
+        page = build_html_page(digest, source_map, self.END_DATE)
+        assert page.count("<details>") >= 2
+
+    def test_empty_digest_renders_without_sections(self):
+        digest = {"date_range": "2026-05-13", "big_news": [], "minor_news": []}
+        page = build_html_page(digest, {}, self.END_DATE)
+        assert "<!DOCTYPE html>" in page
+        assert "עדכוני לחימה" not in page
+
+    def test_sections_in_order(self):
+        digest = {
+            "date_range": "2026-05-13",
+            "big_news": [
+                {"headline": "a", "summary": "s", "links": ["https://t.me/ch/1"], "section": "world", "source": "@ch", "time": "06:00"},
+                {"headline": "b", "summary": "s", "links": ["https://t.me/ch/2"], "section": "conflict", "source": "@ch", "time": "06:00"},
+            ],
+            "minor_news": [],
+        }
+        page = build_html_page(digest, {}, self.END_DATE)
+        assert page.index("עדכוני לחימה") < page.index("כותרות נוספות")
