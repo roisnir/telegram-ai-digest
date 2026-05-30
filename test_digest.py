@@ -589,6 +589,17 @@ class TestBuildHtmlPage:
         assert "📹" in page
         assert "1:30" in page
 
+    def test_source_bubble_uses_per_message_time(self):
+        source_map = {
+            "https://t.me/ch/100": {
+                "text": "טקסט מקורי", "media_type": None, "video_duration": None,
+                "external_links": [], "time": "23:11",
+            },
+            "https://t.me/ch/200": self.SOURCE_MAP["https://t.me/ch/200"],
+        }
+        page = self._build(source_map=source_map)
+        assert "23:11" in page
+
     def test_minor_news_uses_ul(self):
         assert "<ul" in self._build()
 

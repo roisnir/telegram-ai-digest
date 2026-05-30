@@ -381,6 +381,7 @@ def _source_bubble_content(link: str, source_map: dict, time: str = "") -> str:
     media_type = entry.get("media_type")
     video_duration = entry.get("video_duration")
     channel = _channel_from_link(link)
+    time = entry.get("time") or time
 
     meta_parts = []
     if channel:
@@ -476,9 +477,10 @@ def build_html_page(digest: dict[str, Any], source_map: dict, end_date: datetime
 # Telegram helpers
 # ---------------------------------------------------------------------------
 
-def _format_duration(seconds: int | None) -> str:
+def _format_duration(seconds: int | float | None) -> str:
     if seconds is None:
         return "?:??"
+    seconds = int(seconds)
     return f"{seconds // 60}:{seconds % 60:02d}"
 
 
@@ -547,6 +549,7 @@ async def fetch_messages(channel_username: str, start_date: datetime, end_date: 
                 "media_type": media_type,
                 "video_duration": video_duration,
                 "external_links": extract_external_links(message),
+                "time": local_time,
             }
         message_strings.reverse()
         logging.info(f"Fetched {len(message_strings)} messages from @{channel_username}")

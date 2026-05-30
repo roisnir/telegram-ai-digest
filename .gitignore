@@ -4,3 +4,4 @@ session.session
 .python-version
 *.dockerimage
 __pycache__/
+*.log
