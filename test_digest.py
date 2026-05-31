@@ -636,6 +636,51 @@ class TestBuildHtmlPage:
         assert "<!DOCTYPE html>" in page
         assert "עדכוני לחימה" not in page
 
+    def test_further_reading_link_present_when_external_link_in_source_map(self):
+        page = self._build()
+        assert "להמשך קריאה ←" in page
+        assert "https://ynet.co.il/article" in page
+
+    def test_further_reading_link_absent_when_no_external_link(self):
+        source_map_no_ext = {
+            "https://t.me/ch/100": {
+                "text": "טקסט",
+                "media_type": None,
+                "video_duration": None,
+                "external_links": [],
+            },
+        }
+        digest = {
+            "date_range": "2026-05-13",
+            "big_news": [
+                {"headline": "כותרת", "summary": "סיכום", "links": ["https://t.me/ch/100"],
+                 "section": "conflict", "source": "@ch", "time": "06:00"},
+            ],
+            "minor_news": [],
+        }
+        page = build_html_page(digest, source_map_no_ext, self.END_DATE)
+        assert "להמשך קריאה ←" not in page
+
+    def test_minor_news_never_shows_further_reading_link(self):
+        source_map_with_ext = {
+            "https://t.me/ch/200": {
+                "text": "טקסט",
+                "media_type": None,
+                "video_duration": None,
+                "external_links": ["https://external.com/article"],
+            },
+        }
+        digest = {
+            "date_range": "2026-05-13",
+            "big_news": [],
+            "minor_news": [
+                {"headline": "כותרת קטנה", "links": ["https://t.me/ch/200"],
+                 "section": "politics", "source": "@ch", "time": "05:00"},
+            ],
+        }
+        page = build_html_page(digest, source_map_with_ext, self.END_DATE)
+        assert "להמשך קריאה ←" not in page
+
     def test_sections_in_order(self):
         digest = {
             "date_range": "2026-05-13",

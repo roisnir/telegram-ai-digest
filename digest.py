@@ -346,6 +346,9 @@ article h4 { margin: 0 0 0.3rem; font-size: 1.05rem; }
 details { margin-top: 0.5rem; }
 summary { cursor: pointer; color: #555; font-size: 0.85rem; padding: 0.2rem 0.5rem; background: #f0f0f0; border-radius: 4px; display: inline-block; }
 summary:hover { background: #e0e0e0; }
+.further-reading { margin: 0.4rem 0 0; }
+.further-reading a { color: #1a1a2e; font-weight: 600; text-decoration: none; }
+.further-reading a:hover { text-decoration: underline; }
 ul.minor-news { list-style: none; padding: 0; margin: 0; }
 ul.minor-news li { margin-bottom: 0.4rem; padding: 0.5rem 0.75rem; background: white; border-radius: 6px; }
 ul.minor-news li > details > summary { cursor: pointer; font-size: 0.95rem; color: #222; background: none; padding: 0; display: block; }
@@ -390,7 +393,15 @@ _LAZY_LOAD_JS = """(function(){
 })();"""
 
 
-def _big_item_html(item: dict) -> str:
+def _further_reading_url(item: dict, source_map: dict) -> str | None:
+    for link in item.get("links", []):
+        ext = source_map.get(link, {}).get("external_links", [])
+        if ext:
+            return ext[0]
+    return None
+
+
+def _big_item_html(item: dict, further_reading_url: str | None = None) -> str:
     headline = _esc(item.get("headline", ""))
     summary = _esc(item.get("summary", ""))
     source = _esc(item.get("source", ""))
@@ -400,11 +411,12 @@ def _big_item_html(item: dict) -> str:
     meta_parts = [p for p in (source, _esc(time)) if p]
     meta_html = f'<p class="meta"><em>{" | ".join(meta_parts)}</em></p>' if meta_parts else ""
     summary_html = f'<p>{summary}</p>' if summary else ""
+    fr_html = f'<p class="further-reading"><a href="{_esc(further_reading_url)}">להמשך קריאה ←</a></p>' if further_reading_url else ""
 
     label = "מקור" if len(links) == 1 else f"מקורות ({len(links)})"
     thread_html = _thread_details(links, label) if links else ""
 
-    return f'<article>\n<h4>{headline}</h4>\n{meta_html}{summary_html}{thread_html}</article>\n'
+    return f'<article>\n<h4>{headline}</h4>\n{meta_html}{summary_html}{fr_html}{thread_html}</article>\n'
 
 
 def _minor_item_html(item: dict) -> str:
@@ -430,7 +442,7 @@ def build_html_page(digest: dict[str, Any], source_map: dict, end_date: datetime
         minor = [i for i in digest.get("minor_news", []) if i.get("section") == section_key]
         if not big and not minor:
             continue
-        inner = "".join(_big_item_html(item) for item in big)
+        inner = "".join(_big_item_html(item, _further_reading_url(item, source_map)) for item in big)
         if minor:
             minor_li = "".join(_minor_item_html(item) for item in minor)
             inner += f'<ul class="minor-news">\n{minor_li}</ul>\n'

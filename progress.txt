@@ -138,3 +138,24 @@
 - Label convention: "מקור" for 1 link, "מקורות (N)" for N links — keeps the button informative without over-engineering
 
 ---
+
+## 2026-05-31 - US-007 - Add Further Reading link to big-news items
+
+### What was implemented
+- Added `_further_reading_url(item, source_map)` helper: iterates over a big-news item's t.me links, looks each up in `source_map`, and returns the first `external_links[0]` found — or `None` if none present
+- Updated `_big_item_html` to accept `further_reading_url: str | None = None`; when truthy, renders `<p class="further-reading"><a href="...">להמשך קריאה ←</a></p>` between the summary and the source-thread `<details>` button
+- Updated `build_html_page` to call `_further_reading_url(item, source_map)` and pass the result to `_big_item_html` for each big item
+- Added `.further-reading` CSS rule (visually distinct from the thread button)
+- Minor-news items (`_minor_item_html`) are unchanged — they never receive a further-reading URL
+- Added 3 new tests: link present when source_map has external link, absent when no external links, absent on minor news items
+
+### Files changed
+- `digest.py`: added `_further_reading_url`, updated `_big_item_html`, updated `build_html_page` call site, added `.further-reading` CSS
+- `test_digest.py`: 3 new tests in `TestBuildHtmlPage`
+
+### Learnings
+- `source_map` was deliberately kept in `build_html_page`'s signature after US-005 for exactly this use case — no signature change needed, just pass the computed URL down to the render helper
+- Rendering the further-reading link before the source-thread `<details>` keeps read-flow natural: headline → summary → read more → see original
+- The first qualifying external link across all of the story's t.me messages is the right pick: matches how `_primary_href` worked in US-002, and covers merged-message stories correctly
+
+---

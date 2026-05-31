@@ -131,7 +131,7 @@
       "title": "Add Further Reading link to big-news items",
       "issue": "https://github.com/roisnir/telegram-ai-digest/issues/11",
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "blockedBy": ["US-004", "US-005"],
       "acceptanceCriteria": [
         "A big-news item whose messages contain a genuine external link shows a 'להמשך קריאה ←' link (first qualifying link)",
