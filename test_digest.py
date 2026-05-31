@@ -10,6 +10,7 @@ from digest import (
     format_telegram_message,
     build_telegraph_content,
     build_html_page,
+    build_channel_sources,
     _meta_text,
     _deep_item_node,
     _section_nodes,
@@ -692,3 +693,163 @@ class TestBuildHtmlPage:
         }
         page = build_html_page(digest, {}, self.END_DATE)
         assert page.index("עדכוני לחימה") < page.index("כותרות נוספות")
+
+
+# ---------------------------------------------------------------------------
+# build_channel_sources — album (grouped_id) de-duplication
+# ---------------------------------------------------------------------------
+
+def _tg_msg(msg_id, text="", grouped_id=None, photo=False, video=False,
+            file_duration=None, entities=None, dt=None):
+    """Minimal Telethon-message stub for build_channel_sources."""
+    m = Mock()
+    m.id = msg_id
+    m.text = text
+    m.grouped_id = grouped_id
+    m.photo = object() if photo else None
+    m.video = object() if video else None
+    m.document = None
+    m.file = Mock()
+    m.file.duration = file_duration
+    m.entities = entities
+    m.date = dt or datetime(2026, 5, 13, 6, 0, tzinfo=LOCAL_TZ)
+    return m
+
+
+class TestBuildChannelSourcesAlbums:
+    # iter_messages yields newest-first; an album's caption commonly sits on the
+    # oldest (lowest-id) member, encountered last.
+    def _album(self):
+        return [
+            _tg_msg(102, text="", grouped_id=555, photo=True,
+                    dt=datetime(2026, 5, 13, 6, 0, 2, tzinfo=LOCAL_TZ)),
+            _tg_msg(101, text="", grouped_id=555, photo=True,
+                    dt=datetime(2026, 5, 13, 6, 0, 1, tzinfo=LOCAL_TZ)),
+            _tg_msg(100, text="כותרת האלבום", grouped_id=555, photo=True,
+                    dt=datetime(2026, 5, 13, 6, 0, 0, tzinfo=LOCAL_TZ)),
+        ]
+
+    def test_album_collapses_to_single_source(self):
+        strings, source_map = build_channel_sources(self._album(), "ch")
+        assert len(source_map) == 1
+        assert len(strings) == 1
+
+    def test_album_caption_folded_from_any_member(self):
+        _, source_map = build_channel_sources(self._album(), "ch")
+        (entry,) = source_map.values()
+        assert entry["text"] == "כותרת האלבום"
+
+    def test_album_representative_is_anchor_lowest_id(self):
+        # Embedding the album anchor (lowest id) reliably renders the whole album.
+        _, source_map = build_channel_sources(self._album(), "ch")
+        (link,) = source_map.keys()
+        assert link == "https://t.me/ch/100"
+
+    def test_distinct_posts_not_collapsed(self):
+        msgs = [
+            _tg_msg(200, text="סיפור א", grouped_id=None),
+            _tg_msg(199, text="סיפור ב", grouped_id=None),
+        ]
+        _, source_map = build_channel_sources(msgs, "ch")
+        assert len(source_map) == 2
+
+    def test_two_separate_albums_kept_separate(self):
+        msgs = [
+            _tg_msg(300, text="א", grouped_id=1, photo=True),
+            _tg_msg(301, text="", grouped_id=1, photo=True),
+            _tg_msg(302, text="ב", grouped_id=2, photo=True),
+            _tg_msg(303, text="", grouped_id=2, photo=True),
+        ]
+        _, source_map = build_channel_sources(msgs, "ch")
+        assert len(source_map) == 2
+
+    def test_album_with_video_member_marks_video(self):
+        msgs = [
+            _tg_msg(400, text="כותרת", grouped_id=9, photo=True),
+            _tg_msg(401, text="", grouped_id=9, video=True, file_duration=42),
+        ]
+        strings, source_map = build_channel_sources(msgs, "ch")
+        (entry,) = source_map.values()
+        assert entry["media_type"] == "video"
+        assert "[VIDEO:" in strings[0]
+
+    def test_text_only_messages_unaffected(self):
+        msgs = [_tg_msg(500, text="טקסט בלבד")]
+        _, source_map = build_channel_sources(msgs, "ch")
+        assert len(source_map) == 1
+
+    def test_empty_service_message_skipped(self):
+        msgs = [_tg_msg(600, text="")]  # no text, no media
+        strings, source_map = build_channel_sources(msgs, "ch")
+        assert strings == []
+        assert source_map == {}
+
+    def test_source_map_entry_has_sortable_ts(self):
+        _, source_map = build_channel_sources([_tg_msg(700, text="x")], "ch")
+        (entry,) = source_map.values()
+        assert isinstance(entry["ts"], (int, float))
+
+    def test_message_strings_oldest_first(self):
+        msgs = [
+            _tg_msg(800, text="חדש", dt=datetime(2026, 5, 13, 8, 0, tzinfo=LOCAL_TZ)),
+            _tg_msg(799, text="ישן", dt=datetime(2026, 5, 13, 5, 0, tzinfo=LOCAL_TZ)),
+        ]
+        strings, _ = build_channel_sources(msgs, "ch")
+        assert strings[0].index("ישן") >= 0
+        assert "ישן" in strings[0] and "חדש" in strings[1]
+
+
+# ---------------------------------------------------------------------------
+# build_html_page — chronological embed ordering (issue: sort by time)
+# ---------------------------------------------------------------------------
+
+class TestEmbedChronologicalOrder:
+    END_DATE = datetime(2026, 5, 13, 7, 0, tzinfo=LOCAL_TZ)
+
+    def test_embeds_sorted_earliest_first_across_authors(self):
+        # Links listed late->early; later author irrelevant. Expect chronological.
+        digest = {
+            "date_range": "2026-05-13",
+            "big_news": [{
+                "headline": "כותרת", "summary": "סיכום",
+                "links": ["https://t.me/chB/200", "https://t.me/chA/100"],
+                "section": "conflict", "source": "@x", "time": "06:00",
+            }],
+            "minor_news": [],
+        }
+        source_map = {
+            "https://t.me/chB/200": {"external_links": [], "ts": 2000.0},
+            "https://t.me/chA/100": {"external_links": [], "ts": 1000.0},  # earlier
+        }
+        page = build_html_page(digest, source_map, self.END_DATE)
+        assert page.index('data-telegram-post="chA/100"') < page.index('data-telegram-post="chB/200"')
+
+    def test_minor_embeds_also_sorted(self):
+        digest = {
+            "date_range": "2026-05-13",
+            "big_news": [],
+            "minor_news": [{
+                "headline": "כותרת", "section": "politics", "source": "@x", "time": "05:00",
+                "links": ["https://t.me/ch/9", "https://t.me/ch/3"],
+            }],
+        }
+        source_map = {
+            "https://t.me/ch/9": {"external_links": [], "ts": 900.0},
+            "https://t.me/ch/3": {"external_links": [], "ts": 300.0},  # earlier
+        }
+        page = build_html_page(digest, source_map, self.END_DATE)
+        assert page.index('data-telegram-post="ch/3"') < page.index('data-telegram-post="ch/9"')
+
+    def test_duplicate_links_collapse_to_single_embed(self):
+        digest = {
+            "date_range": "2026-05-13",
+            "big_news": [{
+                "headline": "כותרת", "summary": "סיכום",
+                "links": ["https://t.me/ch/5", "https://t.me/ch/5"],
+                "section": "conflict", "source": "@x", "time": "06:00",
+            }],
+            "minor_news": [],
+        }
+        page = build_html_page(digest, {}, self.END_DATE)
+        assert page.count('data-telegram-post="ch/5"') == 1
+        assert "מקור" in page and "מקורות" not in page  # single source label

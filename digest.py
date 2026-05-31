@@ -401,12 +401,19 @@ def _further_reading_url(item: dict, source_map: dict) -> str | None:
     return None
 
 
-def _big_item_html(item: dict, further_reading_url: str | None = None) -> str:
+def _ordered_links(links: list[str], source_map: dict) -> list[str]:
+    """Dedup exact links and order them earliest→latest by message timestamp,
+    regardless of channel. Links missing a timestamp keep their relative order."""
+    unique = list(dict.fromkeys(links))
+    return sorted(unique, key=lambda link: source_map.get(link, {}).get("ts", float('inf')))
+
+
+def _big_item_html(item: dict, source_map: dict, further_reading_url: str | None = None) -> str:
     headline = _esc(item.get("headline", ""))
     summary = _esc(item.get("summary", ""))
     source = _esc(item.get("source", ""))
     time = item.get("time", "")
-    links = item.get("links", [])
+    links = _ordered_links(item.get("links", []), source_map)
 
     meta_parts = [p for p in (source, _esc(time)) if p]
     meta_html = f'<p class="meta"><em>{" | ".join(meta_parts)}</em></p>' if meta_parts else ""
@@ -419,9 +426,9 @@ def _big_item_html(item: dict, further_reading_url: str | None = None) -> str:
     return f'<article>\n<h4>{headline}</h4>\n{meta_html}{summary_html}{fr_html}{thread_html}</article>\n'
 
 
-def _minor_item_html(item: dict) -> str:
+def _minor_item_html(item: dict, source_map: dict) -> str:
     headline = _esc(item.get("headline", ""))
-    links = item.get("links", [])
+    links = _ordered_links(item.get("links", []), source_map)
     placeholders = "".join(_embed_placeholder(link) for link in links)
     return f'<li><details><summary>{headline}</summary>{placeholders}</details></li>\n'
 
@@ -442,9 +449,9 @@ def build_html_page(digest: dict[str, Any], source_map: dict, end_date: datetime
         minor = [i for i in digest.get("minor_news", []) if i.get("section") == section_key]
         if not big and not minor:
             continue
-        inner = "".join(_big_item_html(item, _further_reading_url(item, source_map)) for item in big)
+        inner = "".join(_big_item_html(item, source_map, _further_reading_url(item, source_map)) for item in big)
         if minor:
-            minor_li = "".join(_minor_item_html(item) for item in minor)
+            minor_li = "".join(_minor_item_html(item, source_map) for item in minor)
             inner += f'<ul class="minor-news">\n{minor_li}</ul>\n'
         sections_html += f'<section>\n<h2>{_esc(label)}</h2>\n{inner}</section>\n'
 
@@ -516,44 +523,92 @@ def extract_external_links(message) -> list[str]:
     return links
 
 
-async def fetch_messages(channel_username: str, start_date: datetime, end_date: datetime) -> tuple[list[str], dict]:
+def build_channel_sources(messages, channel_username: str) -> tuple[list[str], dict]:
+    """Build (message_strings, source_map) from telethon messages (newest-first).
+
+    A Telegram album (several photos/videos in one post) arrives as multiple
+    messages that share a ``grouped_id``; visually they are a single post and any
+    member's embed renders the whole album. Collapse each ``grouped_id`` to one
+    source so an album is counted and embedded once, not once per media item.
+    """
+    posts: list[dict] = []
+    group_idx: dict[int, int] = {}
+    for message in messages:
+        media_type, video_duration = extract_media_info(message)
+        text = message.text or ""
+        grouped_id = getattr(message, 'grouped_id', None)
+        if grouped_id is not None and grouped_id in group_idx:
+            post = posts[group_idx[grouped_id]]
+            # Embed the album anchor (lowest id) — it renders the whole album.
+            post["id"] = min(post["id"], message.id)
+            # The caption may sit on a different album member than the anchor.
+            if text and not post["text"]:
+                post["text"] = text
+            if media_type == 'video' and post["media_type"] != 'video':
+                post["media_type"] = 'video'
+                post["video_duration"] = video_duration
+            elif media_type and post["media_type"] is None:
+                post["media_type"] = media_type
+            for url in extract_external_links(message):
+                if url not in post["external_links"]:
+                    post["external_links"].append(url)
+            continue
+        if not text and media_type is None:
+            continue
+        post = {
+            "id": message.id,
+            "text": text,
+            "media_type": media_type,
+            "video_duration": video_duration,
+            "external_links": extract_external_links(message),
+            "time": message.date.astimezone(LOCAL_TZ).strftime('%H:%M'),
+            "ts": message.date.timestamp(),
+        }
+        posts.append(post)
+        if grouped_id is not None:
+            group_idx[grouped_id] = len(posts) - 1
+
     message_strings: list[str] = []
     source_map: dict = {}
+    for post in reversed(posts):  # oldest-first for the Claude prompt
+        link = f"https://t.me/{channel_username}/{post['id']}"
+        if post["media_type"] == 'video':
+            content = post["text"] or "[סרטון]"
+            msg_str = f"[{post['time']}] [VIDEO: {_format_duration(post['video_duration'])}] {content}\nLink: {link}"
+        elif post["media_type"] == 'photo':
+            content = post["text"] or "[תמונה]"
+            msg_str = f"[{post['time']}] [IMAGE] {content}\nLink: {link}"
+        else:
+            msg_str = f"[{post['time']}] {post['text']}\nLink: {link}"
+        message_strings.append(msg_str)
+        source_map[link] = {
+            "text": post["text"],
+            "media_type": post["media_type"],
+            "video_duration": post["video_duration"],
+            "external_links": post["external_links"],
+            "time": post["time"],
+            "ts": post["ts"],
+        }
+    return message_strings, source_map
+
+
+async def fetch_messages(channel_username: str, start_date: datetime, end_date: datetime) -> tuple[list[str], dict]:
     try:
         channel = await client.get_entity(channel_username)
         logging.info(f"Fetching from: {channel.title} (@{channel_username})")
+        raw: list = []
         async for message in client.iter_messages(channel, offset_date=end_date, limit=None):
             if message.date < start_date:
                 break
             if not (start_date <= message.date <= end_date):
                 continue
-            media_type, video_duration = extract_media_info(message)
-            text = message.text or ""
-            if not text and media_type is None:
-                continue
-            link = f"https://t.me/{channel_username}/{message.id}"
-            local_time = message.date.astimezone(LOCAL_TZ).strftime('%H:%M')
-            if media_type == 'video':
-                content = text if text else "[סרטון]"
-                msg_str = f"[{local_time}] [VIDEO: {_format_duration(video_duration)}] {content}\nLink: {link}"
-            elif media_type == 'photo':
-                content = text if text else "[תמונה]"
-                msg_str = f"[{local_time}] [IMAGE] {content}\nLink: {link}"
-            else:
-                msg_str = f"[{local_time}] {text}\nLink: {link}"
-            message_strings.append(msg_str)
-            source_map[link] = {
-                "text": text,
-                "media_type": media_type,
-                "video_duration": video_duration,
-                "external_links": extract_external_links(message),
-                "time": local_time,
-            }
-        message_strings.reverse()
+            raw.append(message)
+        message_strings, source_map = build_channel_sources(raw, channel_username)
         logging.info(f"Fetched {len(message_strings)} messages from @{channel_username}")
+        return message_strings, source_map
     except Exception as e:
         logging.error(f"Error fetching from @{channel_username}: {e}")
-    return message_strings, source_map
+        return [], {}
 
 
 # ---------------------------------------------------------------------------
