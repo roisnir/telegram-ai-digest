@@ -71,3 +71,22 @@
 - nginx `try_files $uri $uri/ =404` is the idiomatic pattern for static file serving; Python http.server is good for quick local testing but should not be recommended for production
 
 ---
+
+## 2026-05-31 - US-004 - Filter self-mirror links out of Further Reading
+
+### What was implemented
+- Added module-level `_MIRROR_LINK_RE` compiled regex: `r'//[^/]*abualiexpress\.[^/]+/heb\d+'` that matches the channel's mirror-permalink pattern (host + `/heb<id>`) regardless of TLD, trailing slash, or `#comments` fragment
+- Updated `extract_external_links` to reject any URL matching `_MIRROR_LINK_RE.search(url)` in addition to the existing `t.me` filter
+- Added `import re` to digest.py imports
+- Added 4 new unit tests in `TestExtractExternalLinks`: mirror permalink excluded, mirror + `#comments` fragment excluded, mirror with trailing slash excluded, genuine external link kept
+
+### Files changed
+- `digest.py`: added `import re`, `_MIRROR_LINK_RE` constant, updated `extract_external_links` filter condition
+- `test_digest.py`: 4 new tests appended to `TestExtractExternalLinks`
+
+### Learnings
+- Detection is by `host + /heb<id>` path pattern — do NOT match on `#comments` fragment alone (real external articles can carry that anchor)
+- The regex pattern `//[^/]*abualiexpress\.[^/]+/heb\d+` covers all TLDs (`.com`, `.co.il`, etc.) without hardcoding
+- `re.search()` rather than `re.match()` is correct here since the protocol prefix (`https://`) precedes the host in the URL string
+
+---

@@ -1,4 +1,5 @@
 import os
+import re
 import html
 import asyncio
 import json
@@ -496,6 +497,11 @@ def extract_media_info(message) -> tuple[str | None, int | None]:
     return (None, None)
 
 
+# Matches channel mirror-permalink pattern: abualiexpress.<tld>/heb<id>
+# Used to exclude Comment Links from Further Reading (see CONTEXT.md)
+_MIRROR_LINK_RE = re.compile(r'//[^/]*abualiexpress\.[^/]+/heb\d+', re.IGNORECASE)
+
+
 def extract_external_links(message) -> list[str]:
     entities = getattr(message, 'entities', None)
     if not entities:
@@ -512,7 +518,7 @@ def extract_external_links(message) -> list[str]:
             offset = getattr(entity, 'offset', 0)
             length = getattr(entity, 'length', 0)
             url = text[offset:offset + length]
-        if url and 't.me' not in url and url not in seen:
+        if url and 't.me' not in url and not _MIRROR_LINK_RE.search(url) and url not in seen:
             seen.add(url)
             links.append(url)
     return links

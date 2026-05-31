@@ -462,6 +462,26 @@ class TestExtractExternalLinks:
         links = extract_external_links(self._msg(text="hello", entities=entities))
         assert links == []
 
+    def test_mirror_permalink_excluded(self):
+        entities = [MessageEntityTextUrl(offset=0, length=4, url="https://abualiexpress.com/heb123456")]
+        links = extract_external_links(self._msg(text="link", entities=entities))
+        assert links == []
+
+    def test_mirror_permalink_with_comments_fragment_excluded(self):
+        entities = [MessageEntityTextUrl(offset=0, length=4, url="https://abualiexpress.com/heb123456#comments")]
+        links = extract_external_links(self._msg(text="link", entities=entities))
+        assert links == []
+
+    def test_mirror_permalink_with_trailing_slash_excluded(self):
+        entities = [MessageEntityTextUrl(offset=0, length=4, url="https://abualiexpress.co.il/heb789/")]
+        links = extract_external_links(self._msg(text="link", entities=entities))
+        assert links == []
+
+    def test_genuine_external_link_kept(self):
+        entities = [MessageEntityTextUrl(offset=0, length=4, url="https://go.amitsegal.co.il/abc123")]
+        links = extract_external_links(self._msg(text="link", entities=entities))
+        assert links == ["https://go.amitsegal.co.il/abc123"]
+
 
 # ---------------------------------------------------------------------------
 # build_html_page

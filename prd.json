@@ -78,7 +78,7 @@
       "title": "Filter self-mirror links out of Further Reading",
       "issue": "https://github.com/roisnir/telegram-ai-digest/issues/8",
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "blockedBy": [],
       "acceptanceCriteria": [
         "extract_external_links excludes the channel's mirror permalinks (abualiexpress.<tld>/heb<id>), with or without a trailing slash, and with or without a #comments fragment",
