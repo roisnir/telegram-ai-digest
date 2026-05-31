@@ -610,7 +610,25 @@ class TestBuildHtmlPage:
         page = build_html_page(digest, {}, self.END_DATE)
         assert 'data-telegram-post="ch/100"' in page
         assert 'data-telegram-post="ch2/200"' in page
-        assert page.count("<details>") >= 2
+        assert page.count("<details>") == 1
+
+    def test_multiple_links_unified_into_single_button(self):
+        digest = {
+            "date_range": "2026-05-13",
+            "big_news": [
+                {
+                    "headline": "כותרת",
+                    "summary": "סיכום",
+                    "links": ["https://t.me/ch/100", "https://t.me/ch2/200"],
+                    "section": "conflict",
+                    "source": "@ch",
+                    "time": "06:00",
+                }
+            ],
+            "minor_news": [],
+        }
+        page = build_html_page(digest, {}, self.END_DATE)
+        assert "מקורות (2)" in page
 
     def test_empty_digest_renders_without_sections(self):
         digest = {"date_range": "2026-05-13", "big_news": [], "minor_news": []}

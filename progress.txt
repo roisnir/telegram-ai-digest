@@ -115,3 +115,26 @@
 - `_tg_post_id` parses `https://t.me/channel/id` by splitting on `/`: `parts[3]` = channel, `parts[4]` = post id
 
 ---
+
+## 2026-05-31 - US-006 - Unify per-source buttons into one source-thread button
+
+### What was implemented
+- Replaced `_embed_details(link, label)` (one `<details>` per link) with two new helpers:
+  - `_embed_placeholder(link)`: returns a bare `<div class="tg-embed" data-telegram-post="...">` with no wrapping `<details>`
+  - `_thread_details(links, label)`: wraps ALL embed placeholders for a story in a single `<details>` element
+- Updated `_big_item_html`: N links → one `<details>` labelled "מקור" (N=1) or "מקורות (N)" (N>1)
+- Updated `_minor_item_html`: embed placeholders are placed directly inside the headline `<details>` — no inner per-embed `<details>` elements
+- The existing lazy-load JS already handled multiple `.tg-embed` placeholders per `<details>` via `querySelectorAll`, so no JS changes were needed
+- Updated `test_multiple_links_produce_multiple_embeds`: asserts `page.count("<details>") == 1` instead of `>= 2`
+- Added `test_multiple_links_unified_into_single_button`: asserts "מקורות (2)" label appears for 2-link stories
+
+### Files changed
+- `digest.py`: removed `_embed_details`; added `_embed_placeholder`, `_thread_details`; updated `_big_item_html`, `_minor_item_html`
+- `test_digest.py`: updated `test_multiple_links_produce_multiple_embeds`; added `test_multiple_links_unified_into_single_button`
+
+### Learnings
+- The lazy-load JS (`d.querySelectorAll('.tg-embed').forEach(...)`) already supported multiple placeholders per `<details>` from US-005 — the HTML restructuring in US-006 required zero JS changes
+- Minor news items already had a single outer `<details>` (headline as summary); removing the inner per-embed `<details>` simplifies the markup and makes lazy-load fire on the headline expand, not a nested button click
+- Label convention: "מקור" for 1 link, "מקורות (N)" for N links — keeps the button informative without over-engineering
+
+---

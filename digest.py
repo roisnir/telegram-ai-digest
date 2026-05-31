@@ -363,10 +363,14 @@ def _tg_post_id(link: str) -> str:
     return ""
 
 
-def _embed_details(link: str, label: str) -> str:
+def _embed_placeholder(link: str) -> str:
     post_id = _tg_post_id(link)
-    placeholder = f'<div class="tg-embed" data-telegram-post="{_esc(post_id)}"></div>'
-    return f'<details><summary>{label}</summary>{placeholder}</details>\n'
+    return f'<div class="tg-embed" data-telegram-post="{_esc(post_id)}"></div>'
+
+
+def _thread_details(links: list[str], label: str) -> str:
+    placeholders = "".join(_embed_placeholder(link) for link in links)
+    return f'<details><summary>{label}</summary>{placeholders}</details>\n'
 
 
 _LAZY_LOAD_JS = """(function(){
@@ -397,22 +401,17 @@ def _big_item_html(item: dict) -> str:
     meta_html = f'<p class="meta"><em>{" | ".join(meta_parts)}</em></p>' if meta_parts else ""
     summary_html = f'<p>{summary}</p>' if summary else ""
 
-    embeds_html = ""
-    for i, link in enumerate(links):
-        label = "מקור" if len(links) == 1 else f"מקור {i + 1}"
-        embeds_html += _embed_details(link, label)
+    label = "מקור" if len(links) == 1 else f"מקורות ({len(links)})"
+    thread_html = _thread_details(links, label) if links else ""
 
-    return f'<article>\n<h4>{headline}</h4>\n{meta_html}{summary_html}{embeds_html}</article>\n'
+    return f'<article>\n<h4>{headline}</h4>\n{meta_html}{summary_html}{thread_html}</article>\n'
 
 
 def _minor_item_html(item: dict) -> str:
     headline = _esc(item.get("headline", ""))
     links = item.get("links", [])
-    embeds_html = "".join(
-        _embed_details(link, "מקור" if len(links) == 1 else f"מקור {i + 1}")
-        for i, link in enumerate(links)
-    )
-    return f'<li><details><summary>{headline}</summary>{embeds_html}</details></li>\n'
+    placeholders = "".join(_embed_placeholder(link) for link in links)
+    return f'<li><details><summary>{headline}</summary>{placeholders}</details></li>\n'
 
 
 _SECTION_ORDER_HTML: list[tuple[str, str]] = [

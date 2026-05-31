@@ -114,7 +114,7 @@
       "title": "Unify per-source buttons into one source-thread button",
       "issue": "https://github.com/roisnir/telegram-ai-digest/issues/10",
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "blockedBy": ["US-005"],
       "acceptanceCriteria": [
         "A story merging N messages shows exactly ONE <details> button; expanding reveals all N embeds in chronological order",
