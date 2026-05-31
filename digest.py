@@ -346,11 +346,6 @@ article h4 { margin: 0 0 0.3rem; font-size: 1.05rem; }
 details { margin-top: 0.5rem; }
 summary { cursor: pointer; color: #555; font-size: 0.85rem; padding: 0.2rem 0.5rem; background: #f0f0f0; border-radius: 4px; display: inline-block; }
 summary:hover { background: #e0e0e0; }
-.source-bubble { background: #fafafa; border: 1px solid #ddd; border-radius: 4px; padding: 0.75rem; margin-top: 0.5rem; font-size: 0.85rem; }
-.bubble-meta { margin: 0 0 0.3rem; }
-.bubble-text { margin: 0.3rem 0; white-space: pre-wrap; word-wrap: break-word; }
-.bubble-media { color: #555; margin: 0.3rem 0; }
-.bubble-tme { color: #0088cc; font-size: 0.8rem; }
 ul.minor-news { list-style: none; padding: 0; margin: 0; }
 ul.minor-news li { margin-bottom: 0.4rem; padding: 0.5rem 0.75rem; background: white; border-radius: 6px; }
 ul.minor-news li > details > summary { cursor: pointer; font-size: 0.95rem; color: #222; background: none; padding: 0; display: block; }
@@ -361,50 +356,37 @@ def _esc(s) -> str:
     return html.escape(str(s)) if s is not None else ""
 
 
-def _primary_href(links: list, source_map: dict) -> str:
-    for link in links:
-        ext = source_map.get(link, {}).get("external_links", [])
-        if ext:
-            return ext[0]
-    return links[0] if links else "#"
-
-
-def _channel_from_link(link: str) -> str:
+def _tg_post_id(link: str) -> str:
     parts = link.split("/")
-    if len(parts) >= 4 and "t.me" in parts[2]:
-        return f"@{parts[3]}"
+    if len(parts) >= 5 and "t.me" in parts[2]:
+        return f"{parts[3]}/{parts[4]}"
     return ""
 
 
-def _source_bubble_content(link: str, source_map: dict, time: str = "") -> str:
-    entry = source_map.get(link, {})
-    text = entry.get("text") or ""
-    media_type = entry.get("media_type")
-    video_duration = entry.get("video_duration")
-    channel = _channel_from_link(link)
-    time = entry.get("time") or time
-
-    meta_parts = []
-    if channel:
-        meta_parts.append(f"<strong>{_esc(channel)}</strong>")
-    if time:
-        meta_parts.append(_esc(time))
-    meta_html = f'<p class="bubble-meta">{" | ".join(meta_parts)}</p>' if meta_parts else ""
-
-    text_html = f'<p class="bubble-text">{_esc(text)}</p>' if text else ""
-
-    if media_type == "video":
-        media_html = f'<p class="bubble-media">📹 {_esc(_format_duration(video_duration))}</p>'
-    elif media_type in ("photo", "document"):
-        media_html = '<p class="bubble-media">🖼</p>'
-    else:
-        media_html = ""
-
-    tme_link = f'<a href="{_esc(link)}" class="bubble-tme">פתח בטלגרם</a>'
-    return f'<div class="source-bubble">{meta_html}{text_html}{media_html}{tme_link}</div>'
+def _embed_details(link: str, label: str) -> str:
+    post_id = _tg_post_id(link)
+    placeholder = f'<div class="tg-embed" data-telegram-post="{_esc(post_id)}"></div>'
+    return f'<details><summary>{label}</summary>{placeholder}</details>\n'
 
 
-def _big_item_html(item: dict, source_map: dict) -> str:
+_LAZY_LOAD_JS = """(function(){
+  document.addEventListener('toggle',function(e){
+    var d=e.target;
+    if(!d.open||d.dataset.embedded)return;
+    d.dataset.embedded='1';
+    d.querySelectorAll('.tg-embed').forEach(function(ph){
+      var sc=document.createElement('script');
+      sc.async=true;
+      sc.src='https://telegram.org/js/telegram-widget.js?23';
+      sc.setAttribute('data-telegram-post',ph.getAttribute('data-telegram-post'));
+      sc.setAttribute('data-width','100%');
+      ph.parentNode.replaceChild(sc,ph);
+    });
+  },true);
+})();"""
+
+
+def _big_item_html(item: dict) -> str:
     headline = _esc(item.get("headline", ""))
     summary = _esc(item.get("summary", ""))
     source = _esc(item.get("source", ""))
@@ -415,24 +397,22 @@ def _big_item_html(item: dict, source_map: dict) -> str:
     meta_html = f'<p class="meta"><em>{" | ".join(meta_parts)}</em></p>' if meta_parts else ""
     summary_html = f'<p>{summary}</p>' if summary else ""
 
-    primary_href = _primary_href(links, source_map)
-    link_html = f'<p><a href="{_esc(primary_href)}">קישור למקור</a></p>' if links else ""
-
-    bubbles_html = ""
+    embeds_html = ""
     for i, link in enumerate(links):
         label = "מקור" if len(links) == 1 else f"מקור {i + 1}"
-        content = _source_bubble_content(link, source_map, time)
-        bubbles_html += f'<details><summary>{label}</summary>{content}</details>\n'
+        embeds_html += _embed_details(link, label)
 
-    return f'<article>\n<h4>{headline}</h4>\n{meta_html}{summary_html}{link_html}{bubbles_html}</article>\n'
+    return f'<article>\n<h4>{headline}</h4>\n{meta_html}{summary_html}{embeds_html}</article>\n'
 
 
-def _minor_item_html(item: dict, source_map: dict) -> str:
+def _minor_item_html(item: dict) -> str:
     headline = _esc(item.get("headline", ""))
     links = item.get("links", [])
-    time = item.get("time", "")
-    bubbles_html = "".join(_source_bubble_content(link, source_map, time) for link in links)
-    return f'<li><details><summary>{headline}</summary>{bubbles_html}</details></li>\n'
+    embeds_html = "".join(
+        _embed_details(link, "מקור" if len(links) == 1 else f"מקור {i + 1}")
+        for i, link in enumerate(links)
+    )
+    return f'<li><details><summary>{headline}</summary>{embeds_html}</details></li>\n'
 
 
 _SECTION_ORDER_HTML: list[tuple[str, str]] = [
@@ -451,9 +431,9 @@ def build_html_page(digest: dict[str, Any], source_map: dict, end_date: datetime
         minor = [i for i in digest.get("minor_news", []) if i.get("section") == section_key]
         if not big and not minor:
             continue
-        inner = "".join(_big_item_html(item, source_map) for item in big)
+        inner = "".join(_big_item_html(item) for item in big)
         if minor:
-            minor_li = "".join(_minor_item_html(item, source_map) for item in minor)
+            minor_li = "".join(_minor_item_html(item) for item in minor)
             inner += f'<ul class="minor-news">\n{minor_li}</ul>\n'
         sections_html += f'<section>\n<h2>{_esc(label)}</h2>\n{inner}</section>\n'
 
@@ -469,6 +449,7 @@ def build_html_page(digest: dict[str, Any], source_map: dict, end_date: datetime
         f'<body>\n'
         f'<header>\n<h1>דיג\'סט יומי</h1>\n<p class="date-range">{date_range}</p>\n</header>\n'
         f'<main>\n{sections_html}</main>\n'
+        f'<script>\n{_LAZY_LOAD_JS}\n</script>\n'
         f'</body>\n'
         f'</html>'
     )

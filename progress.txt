@@ -90,3 +90,28 @@
 - `re.search()` rather than `re.match()` is correct here since the protocol prefix (`https://`) precedes the host in the URL string
 
 ---
+
+## 2026-05-31 - US-005 - Replace source bubbles with lazy-loaded Telegram embeds
+
+### What was implemented
+- Removed `_primary_href`, `_channel_from_link`, `_source_bubble_content` functions and all `.source-bubble`/`.bubble-*` CSS rules
+- Added `_tg_post_id(link)` helper: extracts `channel/id` from a `https://t.me/channel/id` URL
+- Added `_embed_details(link, label)`: renders a `<details>` with a `.tg-embed` placeholder `<div data-telegram-post="channel/id">` instead of a hand-built bubble
+- Added `_LAZY_LOAD_JS` module constant: event-delegation JS that listens for `toggle` events on `<details>`, marks the element as embedded on first open, then replaces each `.tg-embed` placeholder with a dynamically injected `<script async src="telegram-widget.js?23" data-telegram-post="...">` — this ensures the Telegram widget is only loaded when the user actually opens the source panel
+- `build_html_page` now inlines `_LAZY_LOAD_JS` in a `<script>` tag before `</body>`
+- `_big_item_html` and `_minor_item_html` signatures no longer take `source_map` (not needed; embeds render from the t.me link alone)
+- `קישור למקור` link removed from big-news items (embed is the source reference)
+- Removed 8 bubble-specific test assertions; added 6 new tests: `test_embed_has_details_element`, `test_embed_has_data_telegram_post`, `test_embed_minor_has_data_telegram_post`, `test_lazy_load_js_inlined`, `test_no_kishor_lemakhor_in_big_news`, `test_no_source_bubble_markup`
+
+### Files changed
+- `digest.py`: removed `_primary_href`, `_channel_from_link`, `_source_bubble_content`; added `_tg_post_id`, `_embed_details`, `_LAZY_LOAD_JS`; updated `_big_item_html`, `_minor_item_html`, `build_html_page`; removed bubble CSS from `_HTML_CSS`
+- `test_digest.py`: replaced bubble assertions with embed/lazy-load assertions in `TestBuildHtmlPage`
+
+### Learnings
+- Telegram's `telegram-widget.js` processes the `<script>` tag it was invoked from (`document.currentScript`) — dynamically injecting a `<script data-telegram-post="...">` per embed works correctly because each injection is a separate script execution
+- Event delegation on `document` for `'toggle'` (with `useCapture: true`) covers all `<details>` elements, including ones added after page load — no per-element listeners needed
+- Tracking load state with `d.dataset.embedded` (a string flag on the DOM node) is simpler and more reliable than a JS `Set` or WeakSet, and survives serialization
+- `source_map` is no longer needed by the HTML rendering helpers for US-005 — it's kept in `build_html_page`'s signature for US-007 (Further Reading link uses `external_links`)
+- `_tg_post_id` parses `https://t.me/channel/id` by splitting on `/`: `parts[3]` = channel, `parts[4]` = post id
+
+---

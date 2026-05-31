@@ -564,61 +564,27 @@ class TestBuildHtmlPage:
     def test_big_news_summary_paragraph(self):
         assert "סיכום חשוב" in self._build()
 
-    def test_big_news_primary_link_uses_external(self):
-        assert 'href="https://ynet.co.il/article"' in self._build()
-
-    def test_big_news_tme_fallback_when_no_external(self):
-        source_map = {
-            "https://t.me/ch/100": {
-                "text": "טקסט",
-                "media_type": None,
-                "video_duration": None,
-                "external_links": [],
-            },
-            "https://t.me/ch/200": self.SOURCE_MAP["https://t.me/ch/200"],
-        }
-        page = self._build(source_map=source_map)
-        assert 'href="https://t.me/ch/100"' in page
-
-    def test_source_bubble_is_details_element(self):
+    def test_embed_has_details_element(self):
         assert "<details>" in self._build()
 
-    def test_source_bubble_has_channel_name(self):
-        assert "@ch" in self._build()
+    def test_embed_has_data_telegram_post(self):
+        assert 'data-telegram-post="ch/100"' in self._build()
 
-    def test_source_bubble_has_tme_link(self):
-        assert "פתח בטלגרם" in self._build()
+    def test_embed_minor_has_data_telegram_post(self):
+        assert 'data-telegram-post="ch/200"' in self._build()
 
-    def test_source_bubble_has_original_text(self):
-        assert "טקסט מקורי" in self._build()
+    def test_lazy_load_js_inlined(self):
+        page = self._build()
+        assert "telegram-widget.js?23" in page
+        assert "<script>" in page
 
-    def test_source_bubble_photo_media_label(self):
-        assert "🖼" in self._build()
+    def test_no_kishor_lemakhor_in_big_news(self):
+        assert "קישור למקור" not in self._build()
 
-    def test_source_bubble_video_media_label(self):
-        source_map = {
-            "https://t.me/ch/100": {
-                "text": "סרטון",
-                "media_type": "video",
-                "video_duration": 90,
-                "external_links": [],
-            },
-            "https://t.me/ch/200": self.SOURCE_MAP["https://t.me/ch/200"],
-        }
-        page = self._build(source_map=source_map)
-        assert "📹" in page
-        assert "1:30" in page
-
-    def test_source_bubble_uses_per_message_time(self):
-        source_map = {
-            "https://t.me/ch/100": {
-                "text": "טקסט מקורי", "media_type": None, "video_duration": None,
-                "external_links": [], "time": "23:11",
-            },
-            "https://t.me/ch/200": self.SOURCE_MAP["https://t.me/ch/200"],
-        }
-        page = self._build(source_map=source_map)
-        assert "23:11" in page
+    def test_no_source_bubble_markup(self):
+        page = self._build()
+        assert "source-bubble" not in page
+        assert "פתח בטלגרם" not in page
 
     def test_minor_news_uses_ul(self):
         assert "<ul" in self._build()
@@ -626,7 +592,7 @@ class TestBuildHtmlPage:
     def test_minor_news_li_is_details(self):
         assert "<li><details>" in self._build()
 
-    def test_multiple_links_produce_multiple_bubbles(self):
+    def test_multiple_links_produce_multiple_embeds(self):
         digest = {
             "date_range": "2026-05-13",
             "big_news": [
@@ -641,11 +607,9 @@ class TestBuildHtmlPage:
             ],
             "minor_news": [],
         }
-        source_map = {
-            "https://t.me/ch/100": {"text": "א", "media_type": None, "video_duration": None, "external_links": []},
-            "https://t.me/ch2/200": {"text": "ב", "media_type": None, "video_duration": None, "external_links": []},
-        }
-        page = build_html_page(digest, source_map, self.END_DATE)
+        page = build_html_page(digest, {}, self.END_DATE)
+        assert 'data-telegram-post="ch/100"' in page
+        assert 'data-telegram-post="ch2/200"' in page
         assert page.count("<details>") >= 2
 
     def test_empty_digest_renders_without_sections(self):

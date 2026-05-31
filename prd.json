@@ -95,7 +95,7 @@
       "title": "Replace source bubbles with lazy-loaded Telegram embeds",
       "issue": "https://github.com/roisnir/telegram-ai-digest/issues/9",
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "blockedBy": [],
       "acceptanceCriteria": [
         "Each source renders as an official Telegram embed carrying data-telegram-post='<channel>/<id>' derived from the t.me link",
