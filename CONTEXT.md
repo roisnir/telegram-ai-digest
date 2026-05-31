@@ -22,10 +22,15 @@ One of four topical buckets every item is classified into:
 - `deep` — long articles / analyses; headline preserved verbatim, no summary
 
 ### Source Bubble (בועת מקור)
-The expandable UI element in the HTML digest that shows the Source Message in a Telegram-style rounded bubble (gray background, channel name, timestamp). Uses `<details>/<summary>` for native collapse. Appears in both big_news and minor_news items.
+The expandable view of a Source Message in the HTML digest, collapsed by default. Renders the original message inline using Telegram's official post embed (telegram-widget.js), so text, video, and images appear as they do in Telegram. Appears in both big_news and minor_news items. When an item merges several Source Messages, they are shown together as one expandable thread.
 
 ### Media Type
-Whether a Telegram message carries text only, a video (with duration), an image, or a document. Affects how the Source Bubble is labelled (📹 + duration for video, 🖼 for image) and whether the full content can be shown inline.
+Whether a Telegram message carries text only, a video (with duration), an image, or a document. Captured at fetch time so media-only messages are not dropped from the Claude input (`[VIDEO: M:SS]` / `[IMAGE]` markers). In the rendered page the media itself is shown by the Telegram embed, so no separate media label is needed.
 
-### External Link
-A URL inside the Telegram message body that points outside Telegram (e.g. to a news article). Extracted from `message.entities` at fetch time. Used as the primary "קישור למקור" in the digest; the t.me permalink is used as fallback when no external link exists.
+### Further Reading Link (להמשך קריאה)
+A link to a genuinely external article referenced by a Source Message — e.g. a full op-ed column hosted on another site. Extracted from `message.entities` at fetch time. Shown in a digest item only when one exists, framed as optional "further reading" (להמשך קריאה →), never as the item's source — the source is always the Source Message itself (see Source Bubble).
+
+Explicitly NOT a Further Reading Link: a Comment Link (below).
+
+### Comment Link
+A self-referential URL that some channels append to every message, pointing back to the same post on the channel's own web mirror — usually its comments section (e.g. `abualiexpress.com/heb<id>#comments`, or the bare `abualiexpress.com/heb<id>` mirror permalink). It is the same content as the Telegram message, not an external source, so it must be excluded from Further Reading Links. Detection is by the channel's mirror-permalink pattern (host + `/heb<id>` path), not by the `#comments` fragment — matching on `#comments` alone is too fuzzy (a real external article could carry that anchor too).

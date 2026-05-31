@@ -5,3 +5,4 @@ session.session
 *.dockerimage
 __pycache__/
 *.log
+embed-test.html
