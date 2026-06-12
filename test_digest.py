@@ -11,6 +11,9 @@ from digest import (
     build_telegraph_content,
     build_html_page,
     build_channel_sources,
+    compute_channel_stats,
+    compute_coverage,
+    _channel_of_link,
     _meta_text,
     _deep_item_node,
     _section_nodes,
@@ -853,3 +856,222 @@ class TestEmbedChronologicalOrder:
         page = build_html_page(digest, {}, self.END_DATE)
         assert page.count('data-telegram-post="ch/5"') == 1
         assert "מקור" in page and "מקורות" not in page  # single source label
+
+
+# ---------------------------------------------------------------------------
+# Channel-of-link parsing helper
+# ---------------------------------------------------------------------------
+
+class TestChannelOfLink:
+    def test_standard_link(self):
+        assert _channel_of_link("https://t.me/abualiexpress/12500") == "abualiexpress"
+
+    def test_unparseable_returns_empty(self):
+        assert _channel_of_link("https://example.com/foo") == ""
+
+    def test_garbage_returns_empty(self):
+        assert _channel_of_link("not-a-link") == ""
+
+
+# ---------------------------------------------------------------------------
+# Per-channel message stats (top block)
+# ---------------------------------------------------------------------------
+
+class TestComputeChannelStats:
+    def test_multi_channel_counting(self):
+        source_map = {
+            "https://t.me/alpha/1": {},
+            "https://t.me/alpha/2": {},
+            "https://t.me/beta/9": {},
+        }
+        stats = compute_channel_stats(source_map)
+        assert stats["per_channel"] == {"alpha": 2, "beta": 1}
+        assert stats["total"] == 3
+
+    def test_total_equals_sum_of_per_channel(self):
+        source_map = {
+            "https://t.me/alpha/1": {},
+            "https://t.me/beta/2": {},
+            "https://t.me/beta/3": {},
+            "https://t.me/gamma/4": {},
+        }
+        stats = compute_channel_stats(source_map)
+        assert stats["total"] == sum(stats["per_channel"].values())
+
+    def test_ordered_by_descending_count_then_name(self):
+        source_map = {
+            "https://t.me/zeta/1": {},
+            "https://t.me/alpha/1": {},
+            "https://t.me/alpha/2": {},
+        }
+        # alpha (2) before zeta (1)
+        assert list(compute_channel_stats(source_map)["per_channel"]) == ["alpha", "zeta"]
+
+    def test_ties_broken_alphabetically(self):
+        source_map = {
+            "https://t.me/zeta/1": {},
+            "https://t.me/alpha/1": {},
+        }
+        assert list(compute_channel_stats(source_map)["per_channel"]) == ["alpha", "zeta"]
+
+    def test_empty_source_map(self):
+        stats = compute_channel_stats({})
+        assert stats == {"per_channel": {}, "total": 0}
+
+    def test_unparseable_link_skipped(self):
+        source_map = {
+            "https://t.me/alpha/1": {},
+            "https://example.com/foo": {},
+        }
+        stats = compute_channel_stats(source_map)
+        assert stats["per_channel"] == {"alpha": 1}
+        assert stats["total"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Coverage diagnostics (bottom block)
+# ---------------------------------------------------------------------------
+
+class TestComputeCoverage:
+    def test_one_unreferenced_link_classified_uncovered(self):
+        digest = {
+            "big_news": [
+                {"links": ["https://t.me/alpha/1"], "section": "conflict"},
+            ],
+            "minor_news": [
+                {"links": ["https://t.me/beta/9"], "section": "world"},
+            ],
+        }
+        source_map = {
+            "https://t.me/alpha/1": {"ts": 1.0},
+            "https://t.me/beta/9": {"ts": 2.0},
+            "https://t.me/beta/10": {"ts": 3.0},  # never referenced
+        }
+        cov = compute_coverage(digest, source_map)
+        assert cov["total"] == 3
+        assert cov["covered"] == 2
+        assert cov["uncovered"] == ["https://t.me/beta/10"]
+        # covered + uncovered == total, no double counting
+        assert cov["covered"] + len(cov["uncovered"]) == cov["total"]
+
+    def test_per_channel_covered_total(self):
+        digest = {
+            "big_news": [{"links": ["https://t.me/alpha/1"], "section": "conflict"}],
+            "minor_news": [],
+        }
+        source_map = {
+            "https://t.me/alpha/1": {"ts": 1.0},
+            "https://t.me/alpha/2": {"ts": 2.0},  # uncovered
+        }
+        cov = compute_coverage(digest, source_map)
+        assert cov["per_channel"]["alpha"] == {"covered": 1, "total": 2}
+
+    def test_full_coverage(self):
+        digest = {
+            "big_news": [{"links": ["https://t.me/alpha/1"], "section": "conflict"}],
+            "minor_news": [{"links": ["https://t.me/beta/9"], "section": "world"}],
+        }
+        source_map = {
+            "https://t.me/alpha/1": {"ts": 1.0},
+            "https://t.me/beta/9": {"ts": 2.0},
+        }
+        cov = compute_coverage(digest, source_map)
+        assert cov["covered"] == cov["total"] == 2
+        assert cov["uncovered"] == []
+
+    def test_legacy_single_link_field_counts_as_covered(self):
+        digest = {
+            "big_news": [{"link": "https://t.me/alpha/1", "section": "conflict"}],
+            "minor_news": [],
+        }
+        source_map = {"https://t.me/alpha/1": {"ts": 1.0}}
+        cov = compute_coverage(digest, source_map)
+        assert cov["covered"] == 1
+        assert cov["uncovered"] == []
+
+    def test_uncovered_ordered_by_timestamp(self):
+        digest = {"big_news": [], "minor_news": []}
+        source_map = {
+            "https://t.me/alpha/9": {"ts": 900.0},
+            "https://t.me/alpha/3": {"ts": 300.0},  # earlier
+        }
+        cov = compute_coverage(digest, source_map)
+        assert cov["uncovered"] == ["https://t.me/alpha/3", "https://t.me/alpha/9"]
+
+    def test_empty_source_map(self):
+        cov = compute_coverage({"big_news": [], "minor_news": []}, {})
+        assert cov["covered"] == 0
+        assert cov["total"] == 0
+        assert cov["per_channel"] == {}
+        assert cov["uncovered"] == []
+
+
+# ---------------------------------------------------------------------------
+# Rendered HTML: stats header + coverage footer
+# ---------------------------------------------------------------------------
+
+class TestHtmlStatsAndCoverageBlocks:
+    END_DATE = datetime(2026, 5, 13, 7, 0, tzinfo=LOCAL_TZ)
+
+    DIGEST = {
+        "date_range": "2026-05-13",
+        "big_news": [
+            {
+                "headline": "כותרת גדולה", "summary": "סיכום",
+                "links": ["https://t.me/alpha/1"],
+                "section": "conflict", "source": "@alpha", "time": "06:00",
+            }
+        ],
+        "minor_news": [
+            {
+                "headline": "כותרת קטנה",
+                "links": ["https://t.me/beta/9"],
+                "section": "world", "source": "@beta", "time": "05:00",
+            }
+        ],
+    }
+
+    def _source_map(self, with_uncovered):
+        sm = {
+            "https://t.me/alpha/1": {"text": "טקסט אלפא", "ts": 1.0, "time": "06:00", "external_links": []},
+            "https://t.me/beta/9": {"text": "טקסט בטא", "ts": 2.0, "time": "05:00", "external_links": []},
+        }
+        if with_uncovered:
+            sm["https://t.me/beta/10"] = {"text": "הודעה לא מסוקרת", "ts": 3.0, "time": "07:00", "external_links": []}
+        return sm
+
+    def test_channel_stats_block_present_at_top(self):
+        page = build_html_page(self.DIGEST, self._source_map(False), self.END_DATE)
+        assert 'class="channel-stats"' in page
+        # appears after header, before main
+        assert page.index('class="channel-stats"') > page.index("<header>")
+        assert page.index('class="channel-stats"') < page.index("<main>")
+
+    def test_channel_stats_per_channel_lines_and_total(self):
+        page = build_html_page(self.DIGEST, self._source_map(False), self.END_DATE)
+        assert "@alpha — 1 הודעות" in page
+        assert "@beta — 1 הודעות" in page
+        assert 'class="stats-total"' in page
+        assert "2 הודעות" in page  # total
+
+    def test_diagnostics_block_present_at_bottom(self):
+        page = build_html_page(self.DIGEST, self._source_map(False), self.END_DATE)
+        assert 'class="diagnostics"' in page
+        assert page.index('class="diagnostics"') > page.index("</main>")
+
+    def test_all_covered_statement_when_full(self):
+        page = build_html_page(self.DIGEST, self._source_map(False), self.END_DATE)
+        assert "כל ההודעות סוקרו" in page
+        assert "סוקרו 2 מתוך 2 הודעות" in page
+
+    def test_uncovered_details_lists_clickable_link(self):
+        page = build_html_page(self.DIGEST, self._source_map(True), self.END_DATE)
+        assert "<details>" in page
+        assert "1 הודעות שלא סוקרו" in page
+        assert 'href="https://t.me/beta/10"' in page
+        assert "סוקרו 2 מתוך 3 הודעות" in page
+
+    def test_blocks_omitted_for_empty_source_map(self):
+        page = build_html_page(self.DIGEST, {}, self.END_DATE)
+        assert 'class="channel-stats"' not in page
+        assert 'class="diagnostics"' not in page

@@ -352,6 +352,16 @@ summary:hover { background: #e0e0e0; }
 ul.minor-news { list-style: none; padding: 0; margin: 0; }
 ul.minor-news li { margin-bottom: 0.4rem; padding: 0.5rem 0.75rem; background: white; border-radius: 6px; }
 ul.minor-news li > details > summary { cursor: pointer; font-size: 0.95rem; color: #222; background: none; padding: 0; display: block; }
+.channel-stats, .diagnostics { max-width: 800px; margin: 1rem auto; padding: 0 1.5rem; }
+.channel-stats h2 { font-size: 1.1rem; border-bottom: 1px solid #ccc; padding-bottom: 0.3rem; }
+.channel-stats ul { list-style: none; padding: 0; margin: 0.5rem 0; }
+.channel-stats li { padding: 0.2rem 0; font-size: 0.95rem; }
+.stats-total { font-weight: 600; margin: 0.3rem 0 0; }
+.diagnostics { color: #888; font-size: 0.85rem; border-top: 1px solid #ddd; padding-top: 1rem; margin-top: 2rem; }
+.diagnostics h2 { font-size: 1rem; border: none; color: #888; margin: 0 0 0.4rem; }
+.diagnostics ul.coverage-per-channel { list-style: none; padding: 0; margin: 0.3rem 0; }
+.diagnostics li { padding: 0.15rem 0; }
+.diagnostics a { color: #777; }
 """.strip()
 
 
@@ -441,6 +451,146 @@ _SECTION_ORDER_HTML: list[tuple[str, str]] = [
 ]
 
 
+def _channel_of_link(link: str) -> str:
+    """Return the channel username for a t.me message link, or '' if unparseable.
+
+    Links have the shape ``https://t.me/{channel_username}/{message_id}``.
+    """
+    parts = link.split("/")
+    if len(parts) >= 5 and "t.me" in parts[2]:
+        return parts[3]
+    return ""
+
+
+def compute_channel_stats(source_map: dict) -> dict[str, Any]:
+    """Count how many digested messages each source channel contributed.
+
+    Derived purely from ``source_map`` keys so it behaves identically in
+    ``--fixture`` mode. Returns ``{"per_channel": {username: count}, "total": int}``
+    with channels ordered by descending count then name for stable rendering.
+    """
+    counts: dict[str, int] = {}
+    for link in source_map:
+        channel = _channel_of_link(link)
+        if not channel:
+            continue
+        counts[channel] = counts.get(channel, 0) + 1
+    ordered = dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+    return {"per_channel": ordered, "total": sum(counts.values())}
+
+
+def _digest_referenced_links(digest: dict[str, Any]) -> set[str]:
+    """Every t.me link referenced by any big_news or minor_news item.
+
+    Handles both the normalised ``links`` list and a legacy single ``link``.
+    """
+    referenced: set[str] = set()
+    for key in ("big_news", "minor_news"):
+        for item in digest.get(key, []):
+            if not isinstance(item, dict):
+                continue
+            links = item.get("links", [])
+            if isinstance(links, str):
+                links = [links]
+            for link in links:
+                if isinstance(link, str) and link:
+                    referenced.add(link)
+            single = item.get("link")
+            if isinstance(single, str) and single:
+                referenced.add(single)
+    return referenced
+
+
+def compute_coverage(digest: dict[str, Any], source_map: dict) -> dict[str, Any]:
+    """Verify every source message appears in at least one story.
+
+    Returns overall and per-channel covered/total counts plus the ordered list
+    of uncovered source links. Computed from ``source_map`` keys and the digest
+    dict only, so it works the same with fixtures and live data.
+    """
+    referenced = _digest_referenced_links(digest)
+    source_links = list(source_map.keys())
+
+    per_channel: dict[str, dict[str, int]] = {}
+    uncovered: list[str] = []
+    for link in source_links:
+        channel = _channel_of_link(link)
+        bucket = per_channel.setdefault(channel, {"covered": 0, "total": 0})
+        bucket["total"] += 1
+        if link in referenced:
+            bucket["covered"] += 1
+        else:
+            uncovered.append(link)
+
+    uncovered = _ordered_links(uncovered, source_map)
+    ordered_channels = dict(
+        sorted(per_channel.items(), key=lambda kv: (-kv[1]["total"], kv[0]))
+    )
+    return {
+        "covered": sum(b["covered"] for b in per_channel.values()),
+        "total": len(source_links),
+        "per_channel": ordered_channels,
+        "uncovered": uncovered,
+    }
+
+
+def _channel_stats_html(source_map: dict) -> str:
+    stats = compute_channel_stats(source_map)
+    if stats["total"] == 0:
+        return ""
+    items = "".join(
+        f'<li>@{_esc(ch)} — {count} הודעות</li>\n'
+        for ch, count in stats["per_channel"].items()
+    )
+    return (
+        f'<section class="channel-stats">\n'
+        f'<h2>מקורות העדכון</h2>\n'
+        f'<ul>\n{items}</ul>\n'
+        f'<p class="stats-total">סה"כ {stats["total"]} הודעות נכללו בעדכון.</p>\n'
+        f'</section>\n'
+    )
+
+
+def _coverage_html(digest: dict[str, Any], source_map: dict) -> str:
+    cov = compute_coverage(digest, source_map)
+    if cov["total"] == 0:
+        return ""
+
+    per_channel_items = "".join(
+        f'<li>@{_esc(ch)} — סוקרו {b["covered"]} מתוך {b["total"]} הודעות</li>\n'
+        for ch, b in cov["per_channel"].items()
+    )
+
+    if cov["uncovered"]:
+        rows = ""
+        for link in cov["uncovered"]:
+            info = source_map.get(link, {})
+            time = info.get("time", "")
+            snippet = (info.get("text") or "").strip().replace("\n", " ")
+            if len(snippet) > 80:
+                snippet = snippet[:80] + "…"
+            label_parts = [p for p in (_esc(time), _esc(snippet)) if p]
+            label = " — ".join(label_parts) if label_parts else _esc(link)
+            rows += f'<li><a href="{_esc(link)}">{label}</a></li>\n'
+        uncovered_html = (
+            f'<details>\n'
+            f'<summary>{len(cov["uncovered"])} הודעות שלא סוקרו</summary>\n'
+            f'<ul>\n{rows}</ul>\n'
+            f'</details>\n'
+        )
+    else:
+        uncovered_html = '<p>כל ההודעות סוקרו בעדכון. ✓</p>\n'
+
+    return (
+        f'<section class="diagnostics">\n'
+        f'<h2>בדיקת כיסוי</h2>\n'
+        f'<p class="meta">סוקרו {cov["covered"]} מתוך {cov["total"]} הודעות.</p>\n'
+        f'<ul class="coverage-per-channel">\n{per_channel_items}</ul>\n'
+        f'{uncovered_html}'
+        f'</section>\n'
+    )
+
+
 def build_html_page(digest: dict[str, Any], source_map: dict, end_date: datetime) -> str:
     date_range = _esc(digest.get("date_range", ""))
     sections_html = ""
@@ -466,7 +616,9 @@ def build_html_page(digest: dict[str, Any], source_map: dict, end_date: datetime
         f'</head>\n'
         f'<body>\n'
         f'<header>\n<h1>דיג\'סט יומי</h1>\n<p class="date-range">{date_range}</p>\n</header>\n'
+        f'{_channel_stats_html(source_map)}'
         f'<main>\n{sections_html}</main>\n'
+        f'{_coverage_html(digest, source_map)}'
         f'<script>\n{_LAZY_LOAD_JS}\n</script>\n'
         f'</body>\n'
         f'</html>'
@@ -620,6 +772,8 @@ async def main() -> None:
     parser.add_argument('--startdate', type=str, help='Start datetime YYYY-MM-DD or YYYY-MM-DD HH:MM (UTC)')
     parser.add_argument('--enddate', type=str, help='End datetime YYYY-MM-DD or YYYY-MM-DD HH:MM (UTC)')
     parser.add_argument('--dry-run', action='store_true', help='Generate HTML only, skip sending Telegram message')
+    parser.add_argument('--fixture', type=str, help='Load digest from JSON fixture (skips Telegram fetch and Claude API)')
+    parser.add_argument('--output', type=str, help='Write HTML to this exact path instead of HTML_OUTPUT_DIR')
     args = parser.parse_args()
 
     def parse_dt(s: str) -> datetime:
@@ -630,58 +784,77 @@ async def main() -> None:
                 continue
         raise ValueError(f"Unrecognized date format: {s}")
 
-    if args.startdate and args.enddate:
-        start_date = parse_dt(args.startdate)
-        end_date = parse_dt(args.enddate)
-        if len(args.enddate) == 10:
-            end_date = end_date.replace(hour=23, minute=59, second=59)
-    else:
+    if args.fixture:
+        with open(args.fixture) as f:
+            fixture_data = json.load(f)
+        digest = normalize_digest(fixture_data['digest'])
+        source_map = fixture_data.get('source_map', {})
         end_date = datetime.now(UTC)
-        start_date = end_date - timedelta(hours=12)
+        logging.info(f"Loaded fixture: {args.fixture}")
+    else:
+        if args.startdate and args.enddate:
+            start_date = parse_dt(args.startdate)
+            end_date = parse_dt(args.enddate)
+            if len(args.enddate) == 10:
+                end_date = end_date.replace(hour=23, minute=59, second=59)
+        else:
+            end_date = datetime.now(UTC)
+            start_date = end_date - timedelta(hours=12)
 
-    logging.info(f"Update period: {start_date} -> {end_date}")
+        logging.info(f"Update period: {start_date} -> {end_date}")
 
-    await client.start(phone=PHONE_NUMBER)
-    logging.info("Connected to Telegram")
+        await client.start(phone=PHONE_NUMBER)
+        logging.info("Connected to Telegram")
 
-    messages_by_channel: dict[str, list[str]] = {}
-    source_map: dict = {}
-    for username in CHANNEL_USERNAMES:
-        msgs, channel_source_map = await fetch_messages(username, start_date, end_date)
-        if msgs:
-            messages_by_channel[username] = msgs
-        source_map.update(channel_source_map)
+        messages_by_channel: dict[str, list[str]] = {}
+        source_map: dict = {}
+        for username in CHANNEL_USERNAMES:
+            msgs, channel_source_map = await fetch_messages(username, start_date, end_date)
+            if msgs:
+                messages_by_channel[username] = msgs
+            source_map.update(channel_source_map)
 
-    if not messages_by_channel:
-        logging.error("No messages fetched from any channel.")
-        await client.disconnect()
-        return
+        if not messages_by_channel:
+            logging.error("No messages fetched from any channel.")
+            await client.disconnect()
+            return
 
-    logging.info("Generating update via Claude...")
-    digest = await create_digest(messages_by_channel, start_date, end_date)
+        logging.info("Generating update via Claude...")
+        digest = await create_digest(messages_by_channel, start_date, end_date)
 
-    if not digest:
-        logging.error("Failed to generate update.")
-        await client.disconnect()
-        return
+        if not digest:
+            logging.error("Failed to generate update.")
+            await client.disconnect()
+            return
 
     html_content = build_html_page(digest, source_map, end_date)
-    local = end_date.astimezone(LOCAL_TZ)
-    filename = f"digest-{local.strftime('%Y-%m-%d-%H%M')}.html"
-    html_path = Path(HTML_OUTPUT_DIR) / filename
-    html_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if args.output:
+        html_path = Path(args.output)
+        html_path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        local = end_date.astimezone(LOCAL_TZ)
+        filename = f"digest-{local.strftime('%Y-%m-%d-%H%M')}.html"
+        html_path = Path(HTML_OUTPUT_DIR) / filename
+        html_path.parent.mkdir(parents=True, exist_ok=True)
+
     html_path.write_text(html_content, encoding='utf-8')
     logging.info(f"HTML digest saved: {html_path}")
-    page_url = f"{PUBLIC_BASE_URL}/{filename}"
+    page_url = f"{PUBLIC_BASE_URL}/{html_path.name}" if not args.output else str(html_path)
 
-    if not args.dry_run:
+    if not args.dry_run and not args.fixture:
         target = int(TARGET_CHANNEL) if TARGET_CHANNEL.lstrip('-').isdigit() else TARGET_CHANNEL
         message = format_telegram_message(digest, end_date, page_url)
         await client.send_message(target, message, parse_mode='html')
 
-    await client.disconnect()
+    if not args.fixture:
+        await client.disconnect()
 
 
 if __name__ == "__main__":
-    with client:
-        client.loop.run_until_complete(main())
+    import sys
+    if '--fixture' in sys.argv:
+        asyncio.run(main())
+    else:
+        with client:
+            client.loop.run_until_complete(main())
