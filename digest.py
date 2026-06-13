@@ -54,8 +54,6 @@ except ValueError as e:
     logging.error(f"Environment variable error: {str(e)}")
     raise
 
-client = TelegramClient('session', API_ID, API_HASH)
-
 
 # ---------------------------------------------------------------------------
 # Digest helpers (pure functions — no I/O, fully testable)
@@ -803,6 +801,7 @@ async def main() -> None:
 
         logging.info(f"Update period: {start_date} -> {end_date}")
 
+        client = TelegramClient('session', API_ID, API_HASH)
         await client.start(phone=PHONE_NUMBER)
         logging.info("Connected to Telegram")
 
@@ -852,9 +851,4 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    import sys
-    if '--fixture' in sys.argv:
-        asyncio.run(main())
-    else:
-        with client:
-            client.loop.run_until_complete(main())
+    asyncio.run(main())
