@@ -137,6 +137,11 @@ const checkOne = (page, idx) => page.evaluate(async (i, timeoutMs) => {
 
   let injectFails = 0, renderFails = 0;
   for (let i = 0; i < detailsCount; i++) {
+    if (i > 0) {
+      // Close previous details to avoid concurrent Telegram requests triggering rate limits.
+      await page.evaluate(j => { document.querySelectorAll('details')[j - 1].open = false; }, i);
+      await new Promise(r => setTimeout(r, 800));
+    }
     const r = await checkOne(page, i);
     const injectMark = r.injected ? '✅' : '❌';
     const renderMark = r.rendered ? '✅' : '❌';
