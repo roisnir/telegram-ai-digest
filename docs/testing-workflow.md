@@ -17,16 +17,16 @@ Three tiers of quality gates:
 | Pipeline Step | Test Layer | What's Tested | What's Mocked / Omitted |
 |---|---|---|---|
 | Telegram auth | None | — | Entire step skipped |
-| Message fetch + date window | None | — | Entire step skipped |
+| Message fetch + date window | Integration (7 tests) | `fetch_messages` → `build_channel_sources` pipeline: date filtering, album collapse, source_map fields, iter_messages call args, error handling, chronological ordering | Only `client.get_entity` and `client.iter_messages` mocked — everything else runs real |
 | Album collapse + source_map build | Unit (13 tests) | grouped_id dedup, anchor selection, ts field, chronological order, service message skipping | Telethon message objects replaced by hand-rolled stubs |
 | Media + link extraction | Unit (21 tests) | Type detection, duration, comment link exclusion, dedup | Telethon entity objects replaced by local stubs |
-| Claude prompt construction | None | — | Entire step skipped |
-| Claude API call | None | — | Entire step skipped; JSON fixture used downstream |
+| Claude prompt construction | Integration (2 tests) | Channel messages appear in prompt; tool_choice set correctly | Only `anthropic.AsyncAnthropic` mocked |
+| Claude API call + response parsing | Integration (4 tests) | Tool use block extraction, `normalize_digest` applied, empty/missing block handling, no-messages early exit | Only `anthropic.AsyncAnthropic.messages.create` mocked |
 | Digest normalisation | Unit (8 tests) | JSON parsing, link/links promotion, bad-item filtering | Nothing — pure function |
 | HTML rendering | Unit (33 tests) | Structure, sections, embeds, lazy-load JS, ordering, further reading | Nothing — pure function; only 1–2 item synthetic inputs |
-| HTML file write | None | — | Entire step skipped |
+| HTML file write + full pipeline wiring | Integration (3 tests) | `main()` end-to-end: HTML written with content, no-messages early exit, `send_message` called when not dry-run | `TelegramClient` constructor and `anthropic.AsyncAnthropic` constructor mocked; file I/O runs real via `tmp_path` |
 | Telegram message format | Unit (15 tests) | Time label, section emoji, source links, multi-source numbering | Nothing — pure function |
-| Telegram send | None | — | Entire step skipped |
+| Telegram send | Integration (1 test, see above) | `send_message` called once with correct target | Network call mocked via `AsyncMock` |
 | **Browser QA** (opt-in, `qa` label) | Puppeteer | Lazy load, script injection on expand, global embed ID uniqueness, 100% embed render | Nothing — live HTML from `tests/fixtures/sample_digest.json` → `build_html_page()`, live telegram.org. `main()` auth skipped via `--fixture`. |
 
 ---
@@ -35,7 +35,8 @@ Three tiers of quality gates:
 
 | Risk | Severity |
 |---|---|
-| **`main()` wiring untested** — a contract break between fetch/render (e.g. `source_map` key rename) passes all tests, fails at runtime | High |
+| **`main()` wiring: argument contract breaks** — adding/removing a parameter (like the INC-002 `client` arg) passes all unit tests, fails at runtime. Now caught by `TestFetchMessagesIntegration` + `TestMainPipeline`. | ~~High~~ Low |
+| **`main()` wiring: data-shape contract breaks** — renaming a key (e.g. `source_map` → `sources`) passes all tests but breaks the pipeline silently. Integration tests don't stub these shapes so they catch this class. | Medium |
 | **Telegram session expiry** — auth failure at runtime, no notification sent, operator has no alert | High |
 | **Claude returns unknown section** — items silently dropped from output, no log or assertion | Medium |
 | **Claude returns hallucinated link** — embed placeholder generated for non-existent post, silently fails in browser | Medium |
@@ -67,6 +68,28 @@ Three tiers of quality gates:
 - Runs the fixture HTML check and inspects it as a first-time human reader
 - If all pass: sets `passes:true`, commits `chore: verify [ID]`, signals `VERIFIED_PASS`
 - If anything fails: leaves `passes:false`, records specific failure in progress.txt
+
+---
+
+### INC-002 — `fetch_messages` crash after `TelegramClient` de-globalised
+
+**Discovered:** During manual `python digest.py --dry-run` after INC-001's fix moved `client = TelegramClient(...)` from module-level into `main()`.
+
+**Symptom:**
+```
+ERROR - Error fetching from @abualiexpress: name 'client' is not defined
+ERROR - Error fetching from @amitsegal: name 'client' is not defined
+ERROR - No messages fetched from any channel.
+```
+The script connected to Telegram successfully but produced an empty digest.
+
+**Root cause:** `fetch_messages` referenced `client` as a module-level global. When the instantiation moved inside `main()`, `client` became a local variable invisible to the function. Python's scoping means the `NameError` is raised inside the `except` block inside `fetch_messages`, so it is swallowed and logged as a channel error rather than crashing the process — making it easy to miss.
+
+**Why it wasn't caught:** Every test that calls `fetch_messages` passes mock messages directly or patches `client` at the module level. The `--fixture` path skips `fetch_messages` entirely. No test exercises the `fetch_messages` call site inside `main()` with a real or stub `client` object.
+
+**Fix applied:** Added `client` as an explicit first parameter to `fetch_messages`; call site in `main()` updated to pass it (`await fetch_messages(client, username, ...)`).
+
+**Systemic prevention:** This is an instance of the "main() wiring untested" risk already in the Risk Assessment table. The fix aligns with the general mitigation: wiring bugs (wrong argument counts, renamed parameters) are caught immediately if `fetch_messages` requires `client` explicitly rather than closing over a global. No new test coverage added — this class of bug remains in the High-severity untested risk category.
 
 The key invariant the verifier enforces without any Telegram API knowledge:
 > "Are data-telegram-post values globally unique across the page? Does anything repeat that shouldn't?"

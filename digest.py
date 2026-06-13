@@ -742,7 +742,7 @@ def build_channel_sources(messages, channel_username: str) -> tuple[list[str], d
     return message_strings, source_map
 
 
-async def fetch_messages(channel_username: str, start_date: datetime, end_date: datetime) -> tuple[list[str], dict]:
+async def fetch_messages(client, channel_username: str, start_date: datetime, end_date: datetime) -> tuple[list[str], dict]:
     try:
         channel = await client.get_entity(channel_username)
         logging.info(f"Fetching from: {channel.title} (@{channel_username})")
@@ -808,7 +808,7 @@ async def main() -> None:
         messages_by_channel: dict[str, list[str]] = {}
         source_map: dict = {}
         for username in CHANNEL_USERNAMES:
-            msgs, channel_source_map = await fetch_messages(username, start_date, end_date)
+            msgs, channel_source_map = await fetch_messages(client, username, start_date, end_date)
             if msgs:
                 messages_by_channel[username] = msgs
             source_map.update(channel_source_map)

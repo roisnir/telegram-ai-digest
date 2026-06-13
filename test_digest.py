@@ -1,7 +1,8 @@
+import asyncio
 import json
 import pytest
 from datetime import datetime
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 from pytz import UTC, timezone
 
 from digest import (
@@ -19,6 +20,9 @@ from digest import (
     _section_nodes,
     extract_media_info,
     extract_external_links,
+    fetch_messages,
+    create_digest,
+    main,
     LOCAL_TZ,
 )
 
@@ -1075,3 +1079,247 @@ class TestHtmlStatsAndCoverageBlocks:
         page = build_html_page(self.DIGEST, {}, self.END_DATE)
         assert 'class="channel-stats"' not in page
         assert 'class="diagnostics"' not in page
+
+
+# ---------------------------------------------------------------------------
+# Integration helpers
+# ---------------------------------------------------------------------------
+
+def _async_iter_factory(messages):
+    """Returns a side_effect for iter_messages: fresh async generator per call."""
+    async def _gen(*args, **kwargs):
+        for m in messages:
+            yield m
+    return lambda *a, **kw: _gen()
+
+
+def _mock_tg_client(messages):
+    """TelegramClient mock where only the two network calls are faked."""
+    client = AsyncMock()
+    entity = Mock()
+    entity.title = "Test Channel"
+    client.get_entity = AsyncMock(return_value=entity)
+    client.iter_messages = MagicMock(side_effect=_async_iter_factory(messages))
+    return client
+
+
+def _anthropic_stub(big_news=None, minor_news=None, date_range="2026-05-13 10:00 - 2026-05-13 12:00 Israel"):
+    """Stub Anthropic response containing a single publish_digest tool_use block."""
+    block = Mock()
+    block.type = "tool_use"
+    block.input = {
+        "date_range": date_range,
+        "big_news": list(big_news or []),
+        "minor_news": list(minor_news or []),
+    }
+    resp = Mock()
+    resp.content = [block]
+    return resp
+
+
+# ---------------------------------------------------------------------------
+# fetch_messages integration (mocks only Telethon network calls)
+# ---------------------------------------------------------------------------
+
+class TestFetchMessagesIntegration:
+    START = datetime(2026, 5, 13, 8, 0, tzinfo=UTC)
+    END   = datetime(2026, 5, 13, 12, 0, tzinfo=UTC)
+    IN_WINDOW = datetime(2026, 5, 13, 10, 0, tzinfo=UTC)
+
+    def test_single_message_produces_string_and_source_entry(self):
+        msg = _tg_msg(100, text="כותרת", dt=self.IN_WINDOW)
+        strings, source_map = asyncio.run(
+            fetch_messages(_mock_tg_client([msg]), "ch", self.START, self.END)
+        )
+        assert len(strings) == 1
+        assert "https://t.me/ch/100" in source_map
+        assert "https://t.me/ch/100" in strings[0]
+
+    def test_message_before_window_is_excluded(self):
+        msg = _tg_msg(99, text="ישן", dt=datetime(2026, 5, 13, 6, 0, tzinfo=UTC))
+        strings, _ = asyncio.run(
+            fetch_messages(_mock_tg_client([msg]), "ch", self.START, self.END)
+        )
+        assert strings == []
+
+    def test_album_collapses_through_build_channel_sources(self):
+        album = [
+            _tg_msg(102, text="", grouped_id=555, photo=True, dt=self.IN_WINDOW),
+            _tg_msg(101, text="", grouped_id=555, photo=True, dt=self.IN_WINDOW),
+            _tg_msg(100, text="כותרת האלבום", grouped_id=555, photo=True, dt=self.IN_WINDOW),
+        ]
+        strings, source_map = asyncio.run(
+            fetch_messages(_mock_tg_client(album), "ch", self.START, self.END)
+        )
+        assert len(source_map) == 1
+        assert len(strings) == 1
+        assert "https://t.me/ch/100" in source_map  # anchor = lowest id
+
+    def test_source_map_entry_has_required_fields(self):
+        msg = _tg_msg(100, text="טקסט", dt=self.IN_WINDOW)
+        _, source_map = asyncio.run(
+            fetch_messages(_mock_tg_client([msg]), "ch", self.START, self.END)
+        )
+        entry = source_map["https://t.me/ch/100"]
+        for field in ("text", "media_type", "ts", "time", "external_links"):
+            assert field in entry
+
+    def test_iter_messages_called_with_end_date_as_offset(self):
+        client = _mock_tg_client([])
+        asyncio.run(fetch_messages(client, "ch", self.START, self.END))
+        _, kwargs = client.iter_messages.call_args
+        assert kwargs.get("offset_date") == self.END
+
+    def test_get_entity_error_returns_empty(self):
+        client = AsyncMock()
+        client.get_entity = AsyncMock(side_effect=Exception("not found"))
+        strings, source_map = asyncio.run(
+            fetch_messages(client, "ch", self.START, self.END)
+        )
+        assert strings == []
+        assert source_map == {}
+
+    def test_message_strings_oldest_first(self):
+        newer = _tg_msg(200, text="חדש", dt=datetime(2026, 5, 13, 11, 0, tzinfo=UTC))
+        older = _tg_msg(100, text="ישן",  dt=datetime(2026, 5, 13, 9,  0, tzinfo=UTC))
+        strings, _ = asyncio.run(
+            fetch_messages(_mock_tg_client([newer, older]), "ch", self.START, self.END)
+        )
+        assert len(strings) == 2
+        assert "ישן"  in strings[0]
+        assert "חדש" in strings[1]
+
+
+# ---------------------------------------------------------------------------
+# create_digest integration (mocks only Anthropic API call)
+# ---------------------------------------------------------------------------
+
+class TestCreateDigestIntegration:
+    START = datetime(2026, 5, 13, 8,  0, tzinfo=UTC)
+    END   = datetime(2026, 5, 13, 12, 0, tzinfo=UTC)
+
+    def _patch_ac(self, response):
+        mock_ac = AsyncMock()
+        mock_ac.messages.create = AsyncMock(return_value=response)
+        return patch('digest.anthropic.AsyncAnthropic', return_value=mock_ac), mock_ac
+
+    def test_returns_normalized_digest_on_success(self):
+        resp = _anthropic_stub(big_news=[{
+            "headline": "כותרת", "summary": "סיכום",
+            "links": ["https://t.me/ch/1"],
+            "section": "conflict", "source": "@ch", "time": "08:00",
+        }])
+        p, _ = self._patch_ac(resp)
+        with p:
+            result = asyncio.run(create_digest(
+                {"ch": ["[08:00] כותרת\nLink: https://t.me/ch/1"]}, self.START, self.END
+            ))
+        assert result is not None
+        assert result["big_news"][0]["headline"] == "כותרת"
+        assert result["big_news"][0]["links"] == ["https://t.me/ch/1"]
+
+    def test_empty_channel_dict_returns_none_without_api_call(self):
+        p, mock_ac = self._patch_ac(_anthropic_stub())
+        with p:
+            result = asyncio.run(create_digest({}, self.START, self.END))
+        assert result is None
+        mock_ac.messages.create.assert_not_called()
+
+    def test_no_tool_use_block_returns_none(self):
+        resp = Mock()
+        resp.content = []
+        p, _ = self._patch_ac(resp)
+        with p:
+            result = asyncio.run(create_digest({"ch": ["msg"]}, self.START, self.END))
+        assert result is None
+
+    def test_api_called_with_publish_digest_tool(self):
+        p, mock_ac = self._patch_ac(_anthropic_stub())
+        with p:
+            asyncio.run(create_digest({"ch": ["msg"]}, self.START, self.END))
+        kwargs = mock_ac.messages.create.call_args.kwargs
+        assert kwargs["tool_choice"] == {"type": "tool", "name": "publish_digest"}
+
+    def test_channel_messages_appear_in_prompt(self):
+        p, mock_ac = self._patch_ac(_anthropic_stub())
+        with p:
+            asyncio.run(create_digest(
+                {"mychannel": ["[08:00] חדשות חשובות\nLink: https://t.me/mychannel/5"]},
+                self.START, self.END,
+            ))
+        user_content = mock_ac.messages.create.call_args.kwargs["messages"][0]["content"]
+        assert "@mychannel" in user_content
+        assert "חדשות חשובות" in user_content
+
+    def test_normalize_digest_applied_to_response(self):
+        """legacy link field promoted to links[] via the real normalize_digest path."""
+        resp = _anthropic_stub(big_news=[{
+            "headline": "כ", "summary": "ס",
+            "link": "https://t.me/ch/1",  # singular — should be promoted
+            "section": "conflict", "source": "@ch", "time": "08:00",
+        }])
+        p, _ = self._patch_ac(resp)
+        with p:
+            result = asyncio.run(create_digest({"ch": ["msg"]}, self.START, self.END))
+        item = result["big_news"][0]
+        assert "link" not in item
+        assert item["links"] == ["https://t.me/ch/1"]
+
+
+# ---------------------------------------------------------------------------
+# main() pipeline (mocks TelegramClient + Anthropic at the network boundary)
+# ---------------------------------------------------------------------------
+
+class TestMainPipeline:
+    # Explicit window passed via --startdate/--enddate so tests are date-independent.
+    IN_WINDOW   = datetime(2026, 5, 13, 10, 0, tzinfo=UTC)
+    _DATE_ARGS  = ['--startdate', '2026-05-13 08:00', '--enddate', '2026-05-13 12:00']
+
+    def _setup(self, messages, big_news=None):
+        mock_tg = _mock_tg_client(messages)
+        resp = _anthropic_stub(big_news=big_news or [{
+            "headline": "כותרת", "summary": "סיכום",
+            "links": ["https://t.me/ch/100"],
+            "section": "conflict", "source": "@ch", "time": "10:00",
+        }])
+        mock_ac = AsyncMock()
+        mock_ac.messages.create = AsyncMock(return_value=resp)
+        return mock_tg, mock_ac
+
+    def test_html_written_with_digest_content(self, tmp_path):
+        msg = _tg_msg(100, text="חדשות", dt=self.IN_WINDOW)
+        mock_tg, mock_ac = self._setup([msg])
+        output = str(tmp_path / "out.html")
+
+        with patch('digest.TelegramClient', return_value=mock_tg), \
+             patch('digest.anthropic.AsyncAnthropic', return_value=mock_ac), \
+             patch('sys.argv', ['digest.py', '--dry-run', '--output', output] + self._DATE_ARGS):
+            asyncio.run(main())
+
+        html = (tmp_path / "out.html").read_text()
+        assert "<!DOCTYPE html>" in html
+        assert "כותרת" in html
+
+    def test_no_messages_skips_claude_and_does_not_write_html(self, tmp_path):
+        mock_tg, mock_ac = self._setup([])  # iter_messages yields nothing
+        output = str(tmp_path / "out.html")
+
+        with patch('digest.TelegramClient', return_value=mock_tg), \
+             patch('digest.anthropic.AsyncAnthropic', return_value=mock_ac), \
+             patch('sys.argv', ['digest.py', '--dry-run', '--output', output] + self._DATE_ARGS):
+            asyncio.run(main())
+
+        mock_ac.messages.create.assert_not_called()
+        assert not (tmp_path / "out.html").exists()
+
+    def test_send_message_called_when_not_dry_run(self, tmp_path):
+        msg = _tg_msg(100, text="חדשות", dt=self.IN_WINDOW)
+        mock_tg, mock_ac = self._setup([msg])
+        output = str(tmp_path / "out.html")
+
+        with patch('digest.TelegramClient', return_value=mock_tg), \
+             patch('digest.anthropic.AsyncAnthropic', return_value=mock_ac), \
+             patch('sys.argv', ['digest.py', '--output', output] + self._DATE_ARGS):
+            asyncio.run(main())
+
+        mock_tg.send_message.assert_called_once()
