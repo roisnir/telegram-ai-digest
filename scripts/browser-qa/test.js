@@ -76,7 +76,7 @@ const checkOne = (page, idx) => page.evaluate(async (i, timeoutMs) => {
       const h = frame.clientHeight;
       const now = performance.now();
       if (h !== lastH) { lastH = h; lastChange = now; }
-      if (loadFired && h > 80 && (now - lastChange) > 600) {
+      if (loadFired && h > 40 && (now - lastChange) > 600) {
         clearTimeout(safety);
         resolve(true);
         return;
