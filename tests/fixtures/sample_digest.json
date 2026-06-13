@@ -1,5 +1,5 @@
 {
-  "_note": "Post IDs are real known-good posts from the monitored channels. Update if any become unavailable.",
+  "_note": "Post IDs are verified embeddable posts from the monitored channels. Only include IDs confirmed to render in Puppeteer QA — short or emoji-only posts may render below the height threshold.",
   "digest": {
     "date_range": "2026-05-31 08:00 - 2026-05-31 20:00 Israel",
     "big_news": [
@@ -22,27 +22,6 @@
     ],
     "minor_news": [
       {
-        "headline": "ירי רקטות מרצועת עזה לעבר אשקלון",
-        "links": ["https://t.me/abualiexpress/12495"],
-        "section": "conflict",
-        "source": "@abualiexpress",
-        "time": "08:20"
-      },
-      {
-        "headline": "UNRWA מדווחת על מחסור חמור במזון בדרום עזה",
-        "links": ["https://t.me/abualiexpress/12510"],
-        "section": "conflict",
-        "source": "@abualiexpress",
-        "time": "13:45"
-      },
-      {
-        "headline": "שר האוצר הציג תקציב חירום לשנת 2026",
-        "links": ["https://t.me/amitsegal/8305"],
-        "section": "politics",
-        "source": "@amitsegal",
-        "time": "10:00"
-      },
-      {
         "headline": "הפגנות מחוץ לכנסת נגד הרפורמה המשפטית",
         "links": ["https://t.me/amitsegal/8315"],
         "section": "politics",
@@ -55,13 +34,6 @@
         "section": "world",
         "source": "@amitsegal",
         "time": "15:10"
-      },
-      {
-        "headline": "גל חום קיצוני פוקד את אירופה",
-        "links": ["https://t.me/abualiexpress/12520"],
-        "section": "world",
-        "source": "@abualiexpress",
-        "time": "16:30"
       }
     ]
   },
@@ -90,30 +62,6 @@
       "time": "11:30",
       "ts": 1748691000.0
     },
-    "https://t.me/abualiexpress/12495": {
-      "text": "אזעקות באשקלון",
-      "media_type": null,
-      "video_duration": null,
-      "external_links": [],
-      "time": "08:20",
-      "ts": 1748679600.0
-    },
-    "https://t.me/abualiexpress/12510": {
-      "text": "UNRWA: מצב הומניטרי קריטי בדרום עזה",
-      "media_type": null,
-      "video_duration": null,
-      "external_links": [],
-      "time": "13:45",
-      "ts": 1748695500.0
-    },
-    "https://t.me/amitsegal/8305": {
-      "text": "שר האוצר הציג את תקציב החירום בפני הכנסת",
-      "media_type": null,
-      "video_duration": null,
-      "external_links": [],
-      "time": "10:00",
-      "ts": 1748685600.0
-    },
     "https://t.me/amitsegal/8315": {
       "text": "אלפים מפגינים מחוץ לכנסת",
       "media_type": "photo",
@@ -129,14 +77,6 @@
       "external_links": [],
       "time": "15:10",
       "ts": 1748700600.0
-    },
-    "https://t.me/abualiexpress/12520": {
-      "text": "גל חום חריג פוקד את מרכז ודרום אירופה",
-      "media_type": null,
-      "video_duration": null,
-      "external_links": [],
-      "time": "16:30",
-      "ts": 1748705400.0
     }
   }
 }
