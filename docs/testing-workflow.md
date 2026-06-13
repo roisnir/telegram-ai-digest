@@ -8,7 +8,7 @@ Three tiers of quality gates:
 |---|---|---|---|
 | **Unit tests** | Every commit | Automatic (`pytest`) | No |
 | **Verifier agent** | After each story implementation | ralph.sh loop | No |
-| **Browser QA** | Before merging a PR | `/qa` comment on PR | Yes (reviews artifacts) |
+| **Browser QA** | Before merging a PR | Add `qa` label to PR | Yes (reviews artifacts) |
 
 ---
 
@@ -27,7 +27,7 @@ Three tiers of quality gates:
 | HTML file write | None | — | Entire step skipped |
 | Telegram message format | Unit (15 tests) | Time label, section emoji, source links, multi-source numbering | Nothing — pure function |
 | Telegram send | None | — | Entire step skipped |
-| **Browser QA** (opt-in `/qa`) | Puppeteer | Lazy load, script injection on expand, global embed ID uniqueness, 100% embed render | Nothing — live HTML from `tests/fixtures/sample_digest.json` → `build_html_page()`, live telegram.org. `main()` auth skipped via `--fixture`. |
+| **Browser QA** (opt-in, `qa` label) | Puppeteer | Lazy load, script injection on expand, global embed ID uniqueness, 100% embed render | Nothing — live HTML from `tests/fixtures/sample_digest.json` → `build_html_page()`, live telegram.org. `main()` auth skipped via `--fixture`. |
 
 ---
 
@@ -71,9 +71,12 @@ Three tiers of quality gates:
 The key invariant the verifier enforces without any Telegram API knowledge:
 > "Are data-telegram-post values globally unique across the page? Does anything repeat that shouldn't?"
 
-### Browser QA — `/qa` PR comment
+### Browser QA — `qa` label on PR
 
-Triggered by commenting `/qa` on a GitHub PR. Defined in `.github/workflows/qa.yml`.
+Triggered by adding the `qa` label to a GitHub PR. Defined in `.github/workflows/qa.yml`.
+
+Note: `issue_comment` triggers only fire from workflows on the default branch, so a
+label-based trigger is used instead — it runs from the PR head branch where the workflow lives.
 
 **What it does:**
 1. Checks out the PR branch
