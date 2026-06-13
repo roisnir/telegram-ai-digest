@@ -24,6 +24,9 @@ const OUT_DIR = __dirname;
 
 const CHROME = process.env.CHROME_PATH || '/usr/bin/google-chrome';
 const RENDER_TIMEOUT_MS = 25000;
+// Telegram rate-limits GitHub Actions IPs: ~2 widget loads per 50s window.
+// A 60s pause between embeds ensures each request falls outside the previous window.
+const INTER_EMBED_DELAY_MS = 60000;
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -138,13 +141,15 @@ const checkOne = (page, idx) => page.evaluate(async (i, timeoutMs) => {
   let injectFails = 0, renderFails = 0;
   for (let i = 0; i < detailsCount; i++) {
     if (i > 0) {
-      // Remove previous iframes to cancel in-flight Telegram requests and avoid rate limiting.
+      // Remove previous iframes to cancel in-flight Telegram requests, then wait
+      // for the rate-limit window to expire before opening the next embed.
       await page.evaluate(j => {
         const prev = document.querySelectorAll('details')[j - 1];
         prev.open = false;
         prev.querySelectorAll('iframe').forEach(f => f.remove());
       }, i);
-      await new Promise(r => setTimeout(r, 500));
+      log(`  (waiting ${INTER_EMBED_DELAY_MS / 1000}s for Telegram rate-limit window to clear...)`);
+      await new Promise(r => setTimeout(r, INTER_EMBED_DELAY_MS));
     }
     const r = await checkOne(page, i);
     const injectMark = r.injected ? '✅' : '❌';

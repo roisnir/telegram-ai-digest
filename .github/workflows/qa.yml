@@ -57,12 +57,14 @@ jobs:
           CHROME_PATH: /usr/bin/google-chrome
         run: node scripts/browser-qa/test.js /tmp/qa-digest.html
 
-      - name: Upload screenshots
+      - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: qa-screenshots-pr-${{ github.event.pull_request.number }}
-          path: scripts/browser-qa/*.png
+          name: qa-artifacts-pr-${{ github.event.pull_request.number }}
+          path: |
+            scripts/browser-qa/*.png
+            /tmp/qa-digest.html
           retention-days: 14
 
       - name: Post result as PR comment
