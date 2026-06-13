@@ -1,4 +1,6 @@
+aiohttp
 telethon
 pytz
 anthropic
 telegraph
+pytest

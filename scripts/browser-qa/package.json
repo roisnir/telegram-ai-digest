@@ -1,0 +1,11 @@
+{
+  "name": "browser-qa",
+  "private": true,
+  "description": "Opt-in Puppeteer QA harness for the HTML digest page. Triggered by /qa on a PR.",
+  "scripts": {
+    "test": "node test.js"
+  },
+  "dependencies": {
+    "puppeteer-core": "^25.1.0"
+  }
+}

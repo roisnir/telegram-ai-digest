@@ -1,0 +1,43 @@
+{
+  "_note": "Exactly 2 single-link embeds (1 big + 1 minor). Telegram rate-limits GitHub Actions IPs after ~2 widget loads within a 50s window; keeping 2 embeds with a 60s inter-embed delay in test.js ensures the second always falls outside the window. Only include post IDs confirmed to render in Puppeteer QA.",
+  "digest": {
+    "date_range": "2026-05-31 08:00 - 2026-05-31 20:00 Israel",
+    "big_news": [
+      {
+        "headline": "הממשלה דנה בהצעת הפסקת האש עם חמאס",
+        "summary": "קבינט הביטחון נפגש לדיון דחוף בהצעת הפסקת אש המגובה על ידי קטר ומצרים. מקורות ממשלתיים מדווחים על חילוקי דעות פנימיים. ההחלטה צפויה מוקדם בשבוע הבא.",
+        "links": ["https://t.me/amitsegal/8310"],
+        "section": "politics",
+        "source": "@amitsegal",
+        "time": "11:30"
+      }
+    ],
+    "minor_news": [
+      {
+        "headline": "ארה\"ב מכריזה על חבילת סיוע חדשה לאוקראינה",
+        "links": ["https://t.me/amitsegal/8320"],
+        "section": "world",
+        "source": "@amitsegal",
+        "time": "15:10"
+      }
+    ]
+  },
+  "source_map": {
+    "https://t.me/amitsegal/8310": {
+      "text": "קבינט הביטחון מתכנס לדיון בהצעת הפסקת אש",
+      "media_type": null,
+      "video_duration": null,
+      "external_links": [],
+      "time": "11:30",
+      "ts": 1748691000.0
+    },
+    "https://t.me/amitsegal/8320": {
+      "text": "הבית הלבן הכריז על סיוע צבאי נוסף לאוקראינה",
+      "media_type": null,
+      "video_duration": null,
+      "external_links": [],
+      "time": "15:10",
+      "ts": 1748700600.0
+    }
+  }
+}

@@ -4,3 +4,6 @@ session.session
 .python-version
 *.dockerimage
 __pycache__/
+*.log
+embed-test.html
+scripts/browser-qa/node_modules/

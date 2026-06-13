@@ -1,0 +1,161 @@
+
+## 2026-05-29 - US-001 - Media-aware fetch + source map
+
+### What was implemented
+- Added `extract_media_info(message)` pure function: returns `('video', duration_sec)`, `('photo', None)`, `('document', None)`, or `(None, None)` using duck-typed attribute access (`message.video`, `message.photo`, `message.document`, `message.file.duration`)
+- Added `extract_external_links(message)` pure function: filters non-t.me URLs from entities; handles `MessageEntityUrl` (URL embedded in text at offset/length) and `MessageEntityTextUrl` (URL in `.url` attribute); deduplicates preserving first-appearance order
+- Added `_format_duration(seconds)` helper producing `M:SS` format
+- Updated `fetch_messages` to return `tuple[list[str], dict]`; video-only and image-only messages are no longer silently dropped; each message is formatted with `[VIDEO: M:SS]`/`[IMAGE]` prefix; source_map keyed by t.me permalink
+- Updated `main()` to unpack the tuple and accumulate `source_map` across all channels
+
+### Files changed
+- `digest.py`: new functions + updated `fetch_messages` + updated `main()`
+- `test_digest.py`: added `TestExtractMediaInfo` (6 tests) and `TestExtractExternalLinks` (9 tests); stub entity classes used for isinstance-avoidance
+
+### Learnings
+- Telethon message properties (`message.video`, `message.photo`, `message.document`) are the cleanest way to detect media type — avoids raw `isinstance` against internal Telethon TL types
+- Using `type(entity).__name__` for entity dispatch lets tests run with simple stub classes (no telethon import required in tests), while still matching real Telethon object names at runtime
+- Messages with neither text nor media are skipped; photo/video without caption produce Hebrew placeholder labels `[תמונה]`/`[סרטון]`
+- `source_map` is accumulated per-channel via `dict.update()`; key collisions cannot happen because t.me permalinks include the channel username
+
+---
+
+## 2026-05-29 - US-002 - HTML digest page + dry-run
+
+### What was implemented
+- Added `build_html_page(digest, source_map, end_date)` pure function returning a complete self-contained HTML string with `<!DOCTYPE html>`, `lang="he" dir="rtl"`, and all CSS inlined
+- Sections rendered in order: conflict → politics → world → deep; empty sections omitted
+- Big news items rendered as `<article>` with h4 heading, meta line, summary paragraph, `קישור למקור` link (external from source_map if available, t.me fallback), and one `<details>` source bubble per link
+- Minor news items rendered as `<ul class="minor-news">` where each `<li>` is a `<details>` element (summary = headline, expanded = source bubble)
+- Source bubbles show: channel name (bold, extracted from t.me URL), timestamp, original message text, 📹 M:SS or 🖼 media label, and פתח בטלגרם link
+- Removed `publish_to_telegraph`, `TOKEN_FILE`, Telegraph import; removed `telegraph` from requirements.txt
+- Added `--dry-run` argparse flag: generates HTML, saves to `HTML_OUTPUT_DIR`, logs path, skips `send_message`
+- Added `HTML_OUTPUT_DIR` and `PUBLIC_BASE_URL` as required env variables; HTML filename pattern: `digest-YYYY-MM-DD-HHMM.html`
+- Added 21 tests in `TestBuildHtmlPage`; all 95 tests pass
+
+### Files changed
+- `digest.py`: removed Telegraph code, added `_HTML_CSS`, `_esc`, `_primary_href`, `_channel_from_link`, `_source_bubble_content`, `_big_item_html`, `_minor_item_html`, `_SECTION_ORDER_HTML`, `build_html_page`; updated `main()` for `--dry-run` and HTML file output
+- `requirements.txt`: removed `telegraph`
+- `conftest.py`: added `HTML_OUTPUT_DIR` and `PUBLIC_BASE_URL` defaults
+- `test_digest.py`: added `build_html_page` import and `TestBuildHtmlPage` class
+
+### Learnings
+- `import html` (stdlib) provides `html.escape()` for safe HTML generation; name it carefully to avoid shadowing by local variables
+- Channel name can be reliably extracted from t.me URLs by splitting on `/` — `parts[3]` after `https://t.me/`
+- `_primary_href` should iterate over all links and return the first external link found across all source_map entries, not just the first link's external links — this handles merged messages where the primary link might lack external links
+- `conftest.py` is the right place for new required env var defaults so tests don't need a real `.env` at import time
+- The `--dry-run` flag name becomes `args.dry_run` in argparse (dashes become underscores)
+
+---
+
+## 2026-05-29 - US-003 - README: VPS server setup instructions
+
+### What was implemented
+- Removed all Telegraph, Instant View, and `telegraph_token` references from README
+- Updated feature list: describes self-hosted HTML page output instead of Telegraph
+- Updated `.env` example: removed `TELEGRAPH_TOKEN`, added `HTML_OUTPUT_DIR` and `PUBLIC_BASE_URL` with example values
+- Removed "Get your Telegraph token" step 4 entirely
+- Added **Web Server Setup** section covering two options:
+  - nginx: static-file `location /` block with `root`, `try_files`; reload command
+  - Python `http.server`: one-liner for quick testing
+- Updated Docker run examples to mount `HTML_OUTPUT_DIR` as a volume (both manual test run and cron wrapper script)
+- Documented `--dry-run` flag under Usage: explains it generates HTML and logs the path but skips `send_message`
+
+### Files changed
+- `README.md`: full rewrite removing Telegraph references, adding web server setup, documenting `--dry-run`, updating `.env` examples and Docker volume mounts
+
+### Learnings
+- All Telegraph-related content (token, Instant View, publish step) must be removed from every section including the `.env` example, the deployment data-directory listing, and the "done when" narrative in Usage
+- The Docker volume mount for `HTML_OUTPUT_DIR` must appear in BOTH the manual test run example AND the cron wrapper script — easy to miss the cron script
+- `--dry-run` docs belong in the Usage section close to the normal run command so users discover the flag naturally
+- nginx `try_files $uri $uri/ =404` is the idiomatic pattern for static file serving; Python http.server is good for quick local testing but should not be recommended for production
+
+---
+
+## 2026-05-31 - US-004 - Filter self-mirror links out of Further Reading
+
+### What was implemented
+- Added module-level `_MIRROR_LINK_RE` compiled regex: `r'//[^/]*abualiexpress\.[^/]+/heb\d+'` that matches the channel's mirror-permalink pattern (host + `/heb<id>`) regardless of TLD, trailing slash, or `#comments` fragment
+- Updated `extract_external_links` to reject any URL matching `_MIRROR_LINK_RE.search(url)` in addition to the existing `t.me` filter
+- Added `import re` to digest.py imports
+- Added 4 new unit tests in `TestExtractExternalLinks`: mirror permalink excluded, mirror + `#comments` fragment excluded, mirror with trailing slash excluded, genuine external link kept
+
+### Files changed
+- `digest.py`: added `import re`, `_MIRROR_LINK_RE` constant, updated `extract_external_links` filter condition
+- `test_digest.py`: 4 new tests appended to `TestExtractExternalLinks`
+
+### Learnings
+- Detection is by `host + /heb<id>` path pattern — do NOT match on `#comments` fragment alone (real external articles can carry that anchor)
+- The regex pattern `//[^/]*abualiexpress\.[^/]+/heb\d+` covers all TLDs (`.com`, `.co.il`, etc.) without hardcoding
+- `re.search()` rather than `re.match()` is correct here since the protocol prefix (`https://`) precedes the host in the URL string
+
+---
+
+## 2026-05-31 - US-005 - Replace source bubbles with lazy-loaded Telegram embeds
+
+### What was implemented
+- Removed `_primary_href`, `_channel_from_link`, `_source_bubble_content` functions and all `.source-bubble`/`.bubble-*` CSS rules
+- Added `_tg_post_id(link)` helper: extracts `channel/id` from a `https://t.me/channel/id` URL
+- Added `_embed_details(link, label)`: renders a `<details>` with a `.tg-embed` placeholder `<div data-telegram-post="channel/id">` instead of a hand-built bubble
+- Added `_LAZY_LOAD_JS` module constant: event-delegation JS that listens for `toggle` events on `<details>`, marks the element as embedded on first open, then replaces each `.tg-embed` placeholder with a dynamically injected `<script async src="telegram-widget.js?23" data-telegram-post="...">` — this ensures the Telegram widget is only loaded when the user actually opens the source panel
+- `build_html_page` now inlines `_LAZY_LOAD_JS` in a `<script>` tag before `</body>`
+- `_big_item_html` and `_minor_item_html` signatures no longer take `source_map` (not needed; embeds render from the t.me link alone)
+- `קישור למקור` link removed from big-news items (embed is the source reference)
+- Removed 8 bubble-specific test assertions; added 6 new tests: `test_embed_has_details_element`, `test_embed_has_data_telegram_post`, `test_embed_minor_has_data_telegram_post`, `test_lazy_load_js_inlined`, `test_no_kishor_lemakhor_in_big_news`, `test_no_source_bubble_markup`
+
+### Files changed
+- `digest.py`: removed `_primary_href`, `_channel_from_link`, `_source_bubble_content`; added `_tg_post_id`, `_embed_details`, `_LAZY_LOAD_JS`; updated `_big_item_html`, `_minor_item_html`, `build_html_page`; removed bubble CSS from `_HTML_CSS`
+- `test_digest.py`: replaced bubble assertions with embed/lazy-load assertions in `TestBuildHtmlPage`
+
+### Learnings
+- Telegram's `telegram-widget.js` processes the `<script>` tag it was invoked from (`document.currentScript`) — dynamically injecting a `<script data-telegram-post="...">` per embed works correctly because each injection is a separate script execution
+- Event delegation on `document` for `'toggle'` (with `useCapture: true`) covers all `<details>` elements, including ones added after page load — no per-element listeners needed
+- Tracking load state with `d.dataset.embedded` (a string flag on the DOM node) is simpler and more reliable than a JS `Set` or WeakSet, and survives serialization
+- `source_map` is no longer needed by the HTML rendering helpers for US-005 — it's kept in `build_html_page`'s signature for US-007 (Further Reading link uses `external_links`)
+- `_tg_post_id` parses `https://t.me/channel/id` by splitting on `/`: `parts[3]` = channel, `parts[4]` = post id
+
+---
+
+## 2026-05-31 - US-006 - Unify per-source buttons into one source-thread button
+
+### What was implemented
+- Replaced `_embed_details(link, label)` (one `<details>` per link) with two new helpers:
+  - `_embed_placeholder(link)`: returns a bare `<div class="tg-embed" data-telegram-post="...">` with no wrapping `<details>`
+  - `_thread_details(links, label)`: wraps ALL embed placeholders for a story in a single `<details>` element
+- Updated `_big_item_html`: N links → one `<details>` labelled "מקור" (N=1) or "מקורות (N)" (N>1)
+- Updated `_minor_item_html`: embed placeholders are placed directly inside the headline `<details>` — no inner per-embed `<details>` elements
+- The existing lazy-load JS already handled multiple `.tg-embed` placeholders per `<details>` via `querySelectorAll`, so no JS changes were needed
+- Updated `test_multiple_links_produce_multiple_embeds`: asserts `page.count("<details>") == 1` instead of `>= 2`
+- Added `test_multiple_links_unified_into_single_button`: asserts "מקורות (2)" label appears for 2-link stories
+
+### Files changed
+- `digest.py`: removed `_embed_details`; added `_embed_placeholder`, `_thread_details`; updated `_big_item_html`, `_minor_item_html`
+- `test_digest.py`: updated `test_multiple_links_produce_multiple_embeds`; added `test_multiple_links_unified_into_single_button`
+
+### Learnings
+- The lazy-load JS (`d.querySelectorAll('.tg-embed').forEach(...)`) already supported multiple placeholders per `<details>` from US-005 — the HTML restructuring in US-006 required zero JS changes
+- Minor news items already had a single outer `<details>` (headline as summary); removing the inner per-embed `<details>` simplifies the markup and makes lazy-load fire on the headline expand, not a nested button click
+- Label convention: "מקור" for 1 link, "מקורות (N)" for N links — keeps the button informative without over-engineering
+
+---
+
+## 2026-05-31 - US-007 - Add Further Reading link to big-news items
+
+### What was implemented
+- Added `_further_reading_url(item, source_map)` helper: iterates over a big-news item's t.me links, looks each up in `source_map`, and returns the first `external_links[0]` found — or `None` if none present
+- Updated `_big_item_html` to accept `further_reading_url: str | None = None`; when truthy, renders `<p class="further-reading"><a href="...">להמשך קריאה ←</a></p>` between the summary and the source-thread `<details>` button
+- Updated `build_html_page` to call `_further_reading_url(item, source_map)` and pass the result to `_big_item_html` for each big item
+- Added `.further-reading` CSS rule (visually distinct from the thread button)
+- Minor-news items (`_minor_item_html`) are unchanged — they never receive a further-reading URL
+- Added 3 new tests: link present when source_map has external link, absent when no external links, absent on minor news items
+
+### Files changed
+- `digest.py`: added `_further_reading_url`, updated `_big_item_html`, updated `build_html_page` call site, added `.further-reading` CSS
+- `test_digest.py`: 3 new tests in `TestBuildHtmlPage`
+
+### Learnings
+- `source_map` was deliberately kept in `build_html_page`'s signature after US-005 for exactly this use case — no signature change needed, just pass the computed URL down to the render helper
+- Rendering the further-reading link before the source-thread `<details>` keeps read-flow natural: headline → summary → read more → see original
+- The first qualifying external link across all of the story's t.me messages is the right pick: matches how `_primary_href` worked in US-002, and covers merged-message stories correctly
+
+---

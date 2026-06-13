@@ -1,19 +1,20 @@
 
 # Telegram AI Digest Generator
 
-Python script that fetches messages from Telegram channels, summarizes them with Claude AI, and publishes the result as a Telegraph page (Hebrew, Instant View). The Telegraph URL is sent to a private Telegram channel.
+Python script that fetches messages from Telegram channels, summarizes them with Claude AI, and publishes a self-hosted HTML digest page. The page URL is sent to a private Telegram channel.
 
 ## Features
 
 - **Telegram API**: Fetches last 24h of messages from one or more channels via Telethon (user account).
 - **Claude AI**: Classifies and summarizes stories into a structured Hebrew digest.
-- **Telegraph**: Publishes the digest as a Telegraph page with Instant View support.
+- **HTML page**: Generates a self-contained RTL Hebrew HTML page served from your own VPS.
 
 ## Requirements
 
 - Python 3.12+
 - Docker (optional, for server deployment)
 - A Telegram user account with API credentials
+- A web server to serve the generated HTML files (nginx or Python http.server)
 
 ## Setup
 
@@ -33,7 +34,8 @@ PHONE_NUMBER=<your_phone_number>
 CHANNEL_USERNAMES=channel_one,channel_two
 TARGET_CHANNEL=-1001234567890
 CLAUDE_API_KEY=<your_claude_api_key>
-TELEGRAPH_TOKEN=<your_telegraph_token>   # see step 4
+HTML_OUTPUT_DIR=/var/www/digest          # local path where HTML files are written
+PUBLIC_BASE_URL=https://digest.example.com  # public URL prefix (no trailing slash)
 ```
 
 ### 3. Authenticate Telegram (first run only)
@@ -47,15 +49,41 @@ python digest.py
 
 Enter the verification code when prompted. After this, `session.session` is saved and all future runs (including Docker) are non-interactive.
 
-### 4. Get your Telegraph token (first run only)
+## Web Server Setup
 
-On the first run without `TELEGRAPH_TOKEN` set, the script creates a Telegraph account and logs the token:
+The script writes `digest-YYYY-MM-DD-HHMM.html` files to `HTML_OUTPUT_DIR`. You need a web server to make them publicly accessible.
 
+### Option A — nginx (recommended)
+
+Add a static-file location block to your nginx config:
+
+```nginx
+server {
+    listen 80;
+    server_name digest.example.com;
+
+    location / {
+        root /var/www/digest;
+        index index.html;
+        try_files $uri $uri/ =404;
+    }
+}
 ```
-Telegraph account created. Add to .env: TELEGRAPH_TOKEN=<token>
+
+Reload nginx after editing:
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx
 ```
 
-Copy that value into your `.env` file. All subsequent runs (including on the server) will use it from there — no file to manage.
+### Option B — Python http.server (quick testing)
+
+```bash
+cd /var/www/digest
+python3 -m http.server 8080
+```
+
+Access files at `http://<server-ip>:8080/digest-YYYY-MM-DD-HHMM.html`.
 
 ## How to Obtain API Tokens
 
@@ -84,7 +112,7 @@ Copy these files to a persistent directory on your server (e.g. `/opt/telegram-n
 
 ```
 /opt/telegram-news-digest/
-├── .env             # your environment variables (including TELEGRAPH_TOKEN)
+├── .env             # your environment variables
 └── session.session  # generated during first-run auth above
 ```
 
@@ -94,8 +122,11 @@ Copy these files to a persistent directory on your server (e.g. `/opt/telegram-n
 docker run --rm \
   -v /opt/telegram-news-digest/.env:/app/.env:ro \
   -v /opt/telegram-news-digest/session.session:/app/session.session \
+  -v /var/www/digest:/var/www/digest \
   telegram-ai-digest
 ```
+
+Mount `HTML_OUTPUT_DIR` (here `/var/www/digest`) as a volume so generated HTML files are written to the host and served by your web server.
 
 ## Scheduling with crontab
 
@@ -106,6 +137,7 @@ Create a wrapper script at `/opt/telegram-news-digest/run.sh`:
 docker run --rm \
   -v /opt/telegram-news-digest/.env:/app/.env:ro \
   -v /opt/telegram-news-digest/session.session:/app/session.session \
+  -v /var/www/digest:/var/www/digest \
   telegram-ai-digest >> /var/log/digest.log 2>&1
 ```
 
@@ -143,10 +175,19 @@ Run manually:
 python digest.py
 ```
 
+Run in dry-run mode (generates the HTML file and logs its path, but does **not** send the Telegram message):
+
+```bash
+python digest.py --dry-run
+```
+
+Use `--dry-run` to inspect the generated HTML in a browser before deploying, or to test layout changes without spamming the target channel.
+
 The script will:
 1. Fetch messages from the configured Telegram channels (last 24h).
 2. Classify and summarize them into a Hebrew digest using Claude AI.
-3. Publish the digest to Telegraph and send the URL to the target Telegram channel.
+3. Write an HTML digest file to `HTML_OUTPUT_DIR`.
+4. Send the public URL to the target Telegram channel (skipped with `--dry-run`).
 
 ## Logging
 
