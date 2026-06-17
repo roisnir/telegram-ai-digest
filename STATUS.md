@@ -63,10 +63,14 @@ A wrapper script at `/opt/telegram-news-digest/run.sh` keeps the crontab entry s
 
 ```bash
 #!/bin/bash
+IMAGE=telegram-ai-digest:latest
+IMAGE_HASH=$(docker image inspect "$IMAGE" --format '{{.Id}}')
+
 docker run --rm \
+  -e DIGEST_IMAGE_HASH="$IMAGE_HASH" \
   -v /opt/telegram-news-digest/.env:/app/.env:ro \
   -v /opt/telegram-news-digest/session.session:/app/session.session \
-  telegram-ai-digest >> /var/log/digest.log 2>&1
+  "$IMAGE" >> /var/log/digest.log 2>&1
 ```
 
 Crontab entry (runs at 07:00 and 19:00 server time):
