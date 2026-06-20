@@ -10,10 +10,15 @@ from pathlib import Path
 from typing import Any
 
 import anthropic
+import httpx
 from telethon import TelegramClient
+from telethon.sessions import StringSession
 from pytz import UTC, timezone
 
 LOCAL_TZ = timezone('Asia/Jerusalem')
+
+MAX_OUTPUT_TOKENS = 64000
+OUTPUT_TOKEN_WARN_THRESHOLD = 48000  # 75% of the model's 64K output ceiling
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -50,6 +55,7 @@ try:
     TARGET_CHANNEL = get_env_variable('TARGET_CHANNEL')
     HTML_OUTPUT_DIR = get_env_variable('HTML_OUTPUT_DIR')
     PUBLIC_BASE_URL = get_env_variable('PUBLIC_BASE_URL').rstrip('/')
+    BOT_TOKEN = os.getenv('BOT_TOKEN')  # optional: send digest via bot instead of user account
 except ValueError as e:
     logging.error(f"Environment variable error: {str(e)}")
     raise
@@ -304,10 +310,13 @@ async def create_digest(
     for channel, msgs in messages_by_channel.items():
         combined += f"\n\n### Channel: @{channel}\n" + "\n".join(msgs)
 
-    anthropic_client = anthropic.AsyncAnthropic(api_key=CLAUDE_API_KEY)
-    response = await anthropic_client.messages.create(
+    anthropic_client = anthropic.AsyncAnthropic(
+        api_key=CLAUDE_API_KEY,
+        timeout=httpx.Timeout(300.0, connect=10.0),
+    )
+    async with anthropic_client.messages.stream(
         model="claude-sonnet-4-6",
-        max_tokens=8192,
+        max_tokens=MAX_OUTPUT_TOKENS,
         system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
         tools=[DIGEST_TOOL],
         tool_choice={"type": "tool", "name": "publish_digest"},
@@ -315,11 +324,33 @@ async def create_digest(
             "role": "user",
             "content": f"Date range: {date_str}\nTotal messages: {total}\n\nMessages:\n{combined}",
         }],
-    )
+    ) as stream:
+        response = await stream.get_final_message()
+
+    if response.stop_reason == "max_tokens":
+        logging.error(
+            "Claude response truncated at max_tokens (%s output tokens) — digest unusable",
+            response.usage.output_tokens,
+        )
+        return None
+
+    output_tokens = response.usage.output_tokens
+    near_limit = output_tokens >= OUTPUT_TOKEN_WARN_THRESHOLD
+    if near_limit:
+        logging.warning(
+            "Claude output %s tokens — within %s of the %s ceiling; digest may need splitting soon",
+            output_tokens, MAX_OUTPUT_TOKENS - output_tokens, MAX_OUTPUT_TOKENS,
+        )
 
     for block in response.content:
         if block.type == "tool_use":
-            return normalize_digest(dict(block.input))
+            digest = normalize_digest(dict(block.input))
+            digest["_diagnostics"] = {
+                "output_tokens": output_tokens,
+                "max_output_tokens": MAX_OUTPUT_TOKENS,
+                "near_limit": near_limit,
+            }
+            return digest
 
     logging.error("Claude did not return a tool_use block")
     return None
@@ -360,6 +391,7 @@ ul.minor-news li > details > summary { cursor: pointer; font-size: 0.95rem; colo
 .diagnostics ul.coverage-per-channel { list-style: none; padding: 0; margin: 0.3rem 0; }
 .diagnostics li { padding: 0.15rem 0; }
 .diagnostics a { color: #777; }
+.diagnostics-warning { color: #b00020; font-weight: 600; background: #fff3f3; padding: 0.5rem 0.75rem; border-radius: 6px; margin: 0 0 0.6rem; }
 """.strip()
 
 
@@ -551,7 +583,22 @@ def _channel_stats_html(source_map: dict) -> str:
 
 def _coverage_html(digest: dict[str, Any], source_map: dict) -> str:
     cov = compute_coverage(digest, source_map)
+    diag = digest.get("_diagnostics", {})
+    warning_html = ""
+    if diag.get("near_limit"):
+        warning_html = (
+            f'<p class="diagnostics-warning">⚠️ הפלט קרוב למגבלת המודל '
+            f'({diag.get("output_tokens")} מתוך {diag.get("max_output_tokens")} טוקנים). '
+            f'ייתכן שחלק מההודעות לא נכללו — שקול לצמצם את טווח הזמן.</p>\n'
+        )
     if cov["total"] == 0:
+        if warning_html:
+            return (
+                f'<section class="diagnostics">\n'
+                f'<h2>בדיקת כיסוי</h2>\n'
+                f'{warning_html}'
+                f'</section>\n'
+            )
         return ""
 
     per_channel_items = "".join(
@@ -582,6 +629,7 @@ def _coverage_html(digest: dict[str, Any], source_map: dict) -> str:
     return (
         f'<section class="diagnostics">\n'
         f'<h2>בדיקת כיסוי</h2>\n'
+        f'{warning_html}'
         f'<p class="meta">סוקרו {cov["covered"]} מתוך {cov["total"]} הודעות.</p>\n'
         f'<ul class="coverage-per-channel">\n{per_channel_items}</ul>\n'
         f'{uncovered_html}'
@@ -844,7 +892,12 @@ async def main() -> None:
     if not args.dry_run and not args.fixture:
         target = int(TARGET_CHANNEL) if TARGET_CHANNEL.lstrip('-').isdigit() else TARGET_CHANNEL
         message = format_telegram_message(digest, end_date, page_url)
-        await client.send_message(target, message, parse_mode='html')
+        if BOT_TOKEN:
+            bot = await TelegramClient(StringSession(), API_ID, API_HASH).start(bot_token=BOT_TOKEN)
+            await bot.send_message(target, message, parse_mode='html')
+            await bot.disconnect()
+        else:
+            await client.send_message(target, message, parse_mode='html')
 
     if not args.fixture:
         await client.disconnect()

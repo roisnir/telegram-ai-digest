@@ -1114,6 +1114,8 @@ def _anthropic_stub(big_news=None, minor_news=None, date_range="2026-05-13 10:00
     }
     resp = Mock()
     resp.content = [block]
+    resp.stop_reason = "tool_use"
+    resp.usage = Mock(output_tokens=1234)
     return resp
 
 
@@ -1200,7 +1202,12 @@ class TestCreateDigestIntegration:
 
     def _patch_ac(self, response):
         mock_ac = AsyncMock()
-        mock_ac.messages.create = AsyncMock(return_value=response)
+        inner = MagicMock()
+        inner.get_final_message = AsyncMock(return_value=response)
+        stream_cm = MagicMock()
+        stream_cm.__aenter__ = AsyncMock(return_value=inner)
+        stream_cm.__aexit__ = AsyncMock(return_value=False)
+        mock_ac.messages.stream = MagicMock(return_value=stream_cm)
         return patch('digest.anthropic.AsyncAnthropic', return_value=mock_ac), mock_ac
 
     def test_returns_normalized_digest_on_success(self):
@@ -1223,11 +1230,13 @@ class TestCreateDigestIntegration:
         with p:
             result = asyncio.run(create_digest({}, self.START, self.END))
         assert result is None
-        mock_ac.messages.create.assert_not_called()
+        mock_ac.messages.stream.assert_not_called()
 
     def test_no_tool_use_block_returns_none(self):
         resp = Mock()
         resp.content = []
+        resp.stop_reason = "end_turn"
+        resp.usage = Mock(output_tokens=10)
         p, _ = self._patch_ac(resp)
         with p:
             result = asyncio.run(create_digest({"ch": ["msg"]}, self.START, self.END))
@@ -1237,7 +1246,7 @@ class TestCreateDigestIntegration:
         p, mock_ac = self._patch_ac(_anthropic_stub())
         with p:
             asyncio.run(create_digest({"ch": ["msg"]}, self.START, self.END))
-        kwargs = mock_ac.messages.create.call_args.kwargs
+        kwargs = mock_ac.messages.stream.call_args.kwargs
         assert kwargs["tool_choice"] == {"type": "tool", "name": "publish_digest"}
 
     def test_channel_messages_appear_in_prompt(self):
@@ -1247,7 +1256,7 @@ class TestCreateDigestIntegration:
                 {"mychannel": ["[08:00] חדשות חשובות\nLink: https://t.me/mychannel/5"]},
                 self.START, self.END,
             ))
-        user_content = mock_ac.messages.create.call_args.kwargs["messages"][0]["content"]
+        user_content = mock_ac.messages.stream.call_args.kwargs["messages"][0]["content"]
         assert "@mychannel" in user_content
         assert "חדשות חשובות" in user_content
 
@@ -1264,6 +1273,75 @@ class TestCreateDigestIntegration:
         item = result["big_news"][0]
         assert "link" not in item
         assert item["links"] == ["https://t.me/ch/1"]
+
+    def test_truncated_response_returns_none(self):
+        resp = _anthropic_stub(big_news=[{
+            "headline": "כותרת", "summary": "סיכום",
+            "links": ["https://t.me/ch/1"],
+            "section": "conflict", "source": "@ch", "time": "08:00",
+        }])
+        resp.stop_reason = "max_tokens"
+        p, _ = self._patch_ac(resp)
+        with p:
+            result = asyncio.run(create_digest({"ch": ["msg"]}, self.START, self.END))
+        assert result is None
+
+    def test_near_limit_diagnostics_true(self):
+        resp = _anthropic_stub(big_news=[{
+            "headline": "כותרת", "summary": "סיכום",
+            "links": ["https://t.me/ch/1"],
+            "section": "conflict", "source": "@ch", "time": "08:00",
+        }])
+        resp.usage = Mock(output_tokens=50000)
+        p, _ = self._patch_ac(resp)
+        with p:
+            result = asyncio.run(create_digest({"ch": ["msg"]}, self.START, self.END))
+        assert result["_diagnostics"]["near_limit"] is True
+
+    def test_near_limit_diagnostics_false(self):
+        resp = _anthropic_stub(big_news=[{
+            "headline": "כותרת", "summary": "סיכום",
+            "links": ["https://t.me/ch/1"],
+            "section": "conflict", "source": "@ch", "time": "08:00",
+        }])
+        resp.usage = Mock(output_tokens=1234)
+        p, _ = self._patch_ac(resp)
+        with p:
+            result = asyncio.run(create_digest({"ch": ["msg"]}, self.START, self.END))
+        assert result["_diagnostics"]["near_limit"] is False
+
+    def test_html_warning_rendered_when_near_limit(self):
+        digest = {
+            "date_range": "2026-05-13",
+            "big_news": [{
+                "headline": "כותרת", "summary": "סיכום",
+                "links": ["https://t.me/ch/1"],
+                "section": "conflict", "source": "@ch", "time": "08:00",
+            }],
+            "minor_news": [],
+            "_diagnostics": {"output_tokens": 50000, "max_output_tokens": 64000, "near_limit": True},
+        }
+        source_map = {"https://t.me/ch/1": {"text": "כותרת", "media_type": None,
+                                            "video_duration": None, "external_links": [],
+                                            "time": "08:00", "ts": 1.0}}
+        page = build_html_page(digest, source_map, self.END)
+        assert "מגבלת המודל" in page
+
+    def test_html_warning_absent_without_diagnostics(self):
+        digest = {
+            "date_range": "2026-05-13",
+            "big_news": [{
+                "headline": "כותרת", "summary": "סיכום",
+                "links": ["https://t.me/ch/1"],
+                "section": "conflict", "source": "@ch", "time": "08:00",
+            }],
+            "minor_news": [],
+        }
+        source_map = {"https://t.me/ch/1": {"text": "כותרת", "media_type": None,
+                                            "video_duration": None, "external_links": [],
+                                            "time": "08:00", "ts": 1.0}}
+        page = build_html_page(digest, source_map, self.END)
+        assert "מגבלת המודל" not in page
 
 
 # ---------------------------------------------------------------------------
@@ -1283,7 +1361,12 @@ class TestMainPipeline:
             "section": "conflict", "source": "@ch", "time": "10:00",
         }])
         mock_ac = AsyncMock()
-        mock_ac.messages.create = AsyncMock(return_value=resp)
+        inner = MagicMock()
+        inner.get_final_message = AsyncMock(return_value=resp)
+        stream_cm = MagicMock()
+        stream_cm.__aenter__ = AsyncMock(return_value=inner)
+        stream_cm.__aexit__ = AsyncMock(return_value=False)
+        mock_ac.messages.stream = MagicMock(return_value=stream_cm)
         return mock_tg, mock_ac
 
     def test_html_written_with_digest_content(self, tmp_path):
@@ -1309,7 +1392,7 @@ class TestMainPipeline:
              patch('sys.argv', ['digest.py', '--dry-run', '--output', output] + self._DATE_ARGS):
             asyncio.run(main())
 
-        mock_ac.messages.create.assert_not_called()
+        mock_ac.messages.stream.assert_not_called()
         assert not (tmp_path / "out.html").exists()
 
     def test_send_message_called_when_not_dry_run(self, tmp_path):

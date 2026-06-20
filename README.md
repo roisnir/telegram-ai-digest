@@ -34,6 +34,7 @@ PHONE_NUMBER=<your_phone_number>
 CHANNEL_USERNAMES=channel_one,channel_two
 TARGET_CHANNEL=-1001234567890
 CLAUDE_API_KEY=<your_claude_api_key>
+BOT_TOKEN=<optional_bot_token>          # if set, the digest message is sent by this bot (must be admin of TARGET_CHANNEL); otherwise sent by the user account
 HTML_OUTPUT_DIR=/var/www/digest          # local path where HTML files are written
 PUBLIC_BASE_URL=https://digest.example.com  # public URL prefix (no trailing slash)
 ```

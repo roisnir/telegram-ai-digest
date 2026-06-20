@@ -5,5 +5,6 @@ session.session
 *.dockerimage
 __pycache__/
 *.log
+dry-run-output.txt
 embed-test.html
 scripts/browser-qa/node_modules/
