@@ -1,4 +1,4 @@
-telegraph_token.txt
+TELEGraph_token.txt
 session.session
 .env
 .python-version
@@ -8,3 +8,4 @@ __pycache__/
 dry-run-output.txt
 embed-test.html
 scripts/browser-qa/node_modules/
+*.tar.gz
