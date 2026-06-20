@@ -9,15 +9,11 @@ from digest import (
     normalize_digest,
     time_of_day_label,
     format_telegram_message,
-    build_telegraph_content,
     build_html_page,
     build_channel_sources,
     compute_channel_stats,
     compute_coverage,
     _channel_of_link,
-    _meta_text,
-    _deep_item_node,
-    _section_nodes,
     extract_media_info,
     extract_external_links,
     fetch_messages,
@@ -131,141 +127,6 @@ class TestTimeOfDayLabel:
     @pytest.mark.parametrize("hour", [13, 19, 22, 23])
     def test_evening(self, hour):
         assert time_of_day_label(hour) == "ערב"
-
-
-# ---------------------------------------------------------------------------
-# _meta_text
-# ---------------------------------------------------------------------------
-
-class TestMetaText:
-    def test_source_and_time(self):
-        assert _meta_text({"source": "@ch", "time": "07:00"}) == "@ch | 07:00"
-
-    def test_source_only(self):
-        assert _meta_text({"source": "@ch"}) == "@ch"
-
-    def test_time_only(self):
-        assert _meta_text({"time": "07:00"}) == "07:00"
-
-    def test_empty_dict(self):
-        assert _meta_text({}) == ""
-
-    def test_empty_string_values_excluded(self):
-        assert _meta_text({"source": "", "time": ""}) == ""
-
-
-# ---------------------------------------------------------------------------
-# _deep_item_node
-# ---------------------------------------------------------------------------
-
-class TestDeepItemNode:
-    def test_tag_is_p(self):
-        node = _deep_item_node({"headline": "כתבה", "links": ["https://t.me/x/1"], "source": "@ch", "time": "06:00"})
-        assert node["tag"] == "p"
-
-    def test_headline_in_children(self):
-        node = _deep_item_node({"headline": "כתבה", "links": ["https://t.me/x/1"], "source": "@ch", "time": "06:00"})
-        assert any("כתבה" in str(c) for c in node["children"])
-
-    def test_link_produces_anchor(self):
-        node = _deep_item_node({"headline": "כתבה", "links": ["https://t.me/x/1"], "source": "@ch", "time": "06:00"})
-        assert any(isinstance(c, dict) and c.get("tag") == "a" for c in node["children"])
-
-    def test_multiple_links_produce_multiple_anchors(self):
-        node = _deep_item_node({"headline": "כתבה", "links": ["https://t.me/x/1", "https://t.me/x/2"], "source": "@ch", "time": "06:00"})
-        anchors = [c for c in node["children"] if isinstance(c, dict) and c.get("tag") == "a"]
-        assert len(anchors) == 2
-
-    def test_without_links_no_anchor(self):
-        node = _deep_item_node({"headline": "כתבה", "links": [], "source": "@ch", "time": "06:00"})
-        assert not any(isinstance(c, dict) and c.get("tag") == "a" for c in node["children"])
-
-
-# ---------------------------------------------------------------------------
-# _section_nodes
-# ---------------------------------------------------------------------------
-
-class TestSectionNodes:
-    def _big(self, **kw):
-        return {"headline": "כותרת", "summary": "סיכום", "links": ["https://t.me/x/1"],
-                "source": "@ch", "time": "06:00", **kw}
-
-    def _minor(self, **kw):
-        return {"headline": "כותרת קטנה", "links": ["https://t.me/x/2"],
-                "source": "@ch", "time": "05:00", **kw}
-
-    def test_empty_inputs_returns_empty(self):
-        assert _section_nodes([], []) == []
-
-    def test_big_item_produces_h4(self):
-        nodes = _section_nodes([self._big()], [])
-        assert any(n["tag"] == "h4" and n["children"] == ["כותרת"] for n in nodes)
-
-    def test_big_item_produces_summary_paragraph(self):
-        nodes = _section_nodes([self._big()], [])
-        p_texts = [n["children"][0] for n in nodes if n["tag"] == "p" and isinstance(n["children"][0], str)]
-        assert "סיכום" in p_texts
-
-    def test_big_item_no_summary_skips_paragraph(self):
-        nodes = _section_nodes([self._big(summary="")], [])
-        p_texts = [n["children"][0] for n in nodes if n["tag"] == "p" and isinstance(n["children"][0], str)]
-        assert "" not in p_texts
-
-    def test_minor_items_produce_subheading(self):
-        nodes = _section_nodes([], [self._minor()])
-        h4_texts = [n["children"][0] for n in nodes if n["tag"] == "h4"]
-        assert "עוד עדכונים" in h4_texts
-
-    def test_minor_items_produce_ul(self):
-        nodes = _section_nodes([], [self._minor()])
-        assert any(n["tag"] == "ul" for n in nodes)
-
-    def test_no_minor_no_subheading(self):
-        nodes = _section_nodes([self._big()], [])
-        h4_texts = [n["children"][0] for n in nodes if n["tag"] == "h4"]
-        assert "עוד עדכונים" not in h4_texts
-
-    def test_deep_returns_only_p_tags(self):
-        nodes = _section_nodes([self._big()], [self._minor()], is_deep=True)
-        assert all(n["tag"] == "p" for n in nodes)
-
-
-# ---------------------------------------------------------------------------
-# build_telegraph_content
-# ---------------------------------------------------------------------------
-
-class TestBuildTelegraphContent:
-    DIGEST = {
-        "date_range": "...",
-        "big_news": [
-            {"headline": "לחימה", "summary": "סיכום", "links": ["https://t.me/x/1"],
-             "section": "conflict", "source": "@ch", "time": "06:00"},
-            {"headline": "ניתוח", "summary": "", "links": ["https://t.me/x/3"],
-             "section": "deep", "source": "@ch", "time": "04:00"},
-        ],
-        "minor_news": [
-            {"headline": "פוליטיקה", "links": ["https://t.me/x/2"],
-             "section": "politics", "source": "@ch", "time": "05:00"},
-        ],
-    }
-
-    def _h3_texts(self, content):
-        return [n["children"][0] for n in content if n["tag"] == "h3"]
-
-    def test_conflict_section_present(self):
-        assert "עדכוני לחימה והסכסוך" in self._h3_texts(build_telegraph_content(self.DIGEST))
-
-    def test_politics_section_present(self):
-        assert "פוליטיקה ישראלית" in self._h3_texts(build_telegraph_content(self.DIGEST))
-
-    def test_deep_section_present(self):
-        assert "לקריאה נוספת" in self._h3_texts(build_telegraph_content(self.DIGEST))
-
-    def test_empty_section_omitted(self):
-        assert "כותרות נוספות" not in self._h3_texts(build_telegraph_content(self.DIGEST))
-
-    def test_empty_digest_returns_empty(self):
-        assert build_telegraph_content({"big_news": [], "minor_news": []}) == []
 
 
 # ---------------------------------------------------------------------------

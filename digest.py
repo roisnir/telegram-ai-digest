@@ -96,92 +96,12 @@ def _local_end_date(end_date: datetime) -> datetime:
     return end_date.astimezone(LOCAL_TZ)
 
 
-def _meta_text(item: dict[str, Any]) -> str:
-    parts = [p for p in (item.get("source", ""), item.get("time", "")) if p]
-    return " | ".join(parts)
-
-
-def _link_nodes(links: list[str], label: str = "קישור") -> list:
-    nodes = []
-    for i, link in enumerate(links):
-        text = label if len(links) == 1 else f"{label} {i + 1}"
-        if nodes:
-            nodes.append(" | ")
-        nodes.append({"tag": "a", "attrs": {"href": link}, "children": [text]})
-    return nodes
-
-
-def _deep_item_node(item: dict[str, Any]) -> dict:
-    meta = _meta_text(item)
-    headline = item.get("headline", "")
-    links = item.get("links", [])
-    label = f"כתבה מ-{meta}: " if meta else ""
-    children: list = [label + headline]
-    if links:
-        children.append(" — ")
-        children.extend(_link_nodes(links, "לקריאה"))
-    return {"tag": "p", "children": children}
-
-
-def _section_nodes(items_big: list[dict], items_minor: list[dict], is_deep: bool = False) -> list[dict]:
-    if is_deep:
-        return [_deep_item_node(i) for i in items_big + items_minor]
-
-    nodes: list[dict] = []
-    for item in items_big:
-        nodes.append({"tag": "h4", "children": [item.get("headline", "")]})
-        meta = _meta_text(item)
-        if meta:
-            nodes.append({"tag": "p", "children": [{"tag": "i", "children": [meta]}]})
-        if item.get("summary"):
-            nodes.append({"tag": "p", "children": [item["summary"]]})
-        links = item.get("links", [])
-        if links:
-            nodes.append({"tag": "p", "children": _link_nodes(links, "קישור למקור")})
-
-    if items_minor:
-        nodes.append({"tag": "h4", "children": ["עוד עדכונים"]})
-        li_nodes = []
-        for item in items_minor:
-            meta = _meta_text(item)
-            children: list = [item.get("headline", "")]
-            if meta:
-                children.append(f" ({meta})")
-            links = item.get("links", [])
-            if links:
-                children.append(" — ")
-                children.extend(_link_nodes(links, "קישור"))
-            li_nodes.append({"tag": "li", "children": children})
-        nodes.append({"tag": "ul", "children": li_nodes})
-
-    return nodes
-
-
-SECTION_HEADINGS: list[tuple[str, str, bool]] = [
-    ("עדכוני לחימה והסכסוך", "conflict", False),
-    ("פוליטיקה ישראלית", "politics", False),
-    ("כותרות נוספות", "world", False),
-    ("לקריאה נוספת", "deep", True),
-]
-
 SECTION_EMOJI: dict[str, str] = {
     "conflict": "⚔️",
     "politics": "🏛️",
     "world": "🌍",
     "deep": "📖",
 }
-
-
-def build_telegraph_content(digest: dict[str, Any]) -> list[dict]:
-    content: list[dict] = []
-    for heading, key, is_deep in SECTION_HEADINGS:
-        big = [i for i in digest.get("big_news", []) if i.get("section") == key]
-        minor = [i for i in digest.get("minor_news", []) if i.get("section") == key]
-        if not big and not minor:
-            continue
-        content.append({"tag": "h3", "children": [heading]})
-        content.extend(_section_nodes(big, minor, is_deep=is_deep))
-    return content
 
 
 def format_telegram_message(digest: dict[str, Any], end_date: datetime, page_url: str) -> str:
