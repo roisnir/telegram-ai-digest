@@ -34,6 +34,7 @@ PHONE_NUMBER=<your_phone_number>
 CHANNEL_USERNAMES=channel_one,channel_two
 TARGET_CHANNEL=-1001234567890
 CLAUDE_API_KEY=<your_claude_api_key>
+BOT_TOKEN=<optional_bot_token>          # if set, the digest message is sent by this bot (must be admin of TARGET_CHANNEL); otherwise sent by the user account
 HTML_OUTPUT_DIR=/var/www/digest          # local path where HTML files are written
 PUBLIC_BASE_URL=https://digest.example.com  # public URL prefix (no trailing slash)
 ```
@@ -103,8 +104,14 @@ Access files at `http://<server-ip>:8080/digest-YYYY-MM-DD-HHMM.html`.
 ### Build the image
 
 ```bash
-docker build -t telegram-ai-digest .
+./build.sh            # tag = short commit, plus :latest
+./build.sh v0.0.4     # explicit version tag, plus :latest
 ```
+
+`build.sh` refuses to build from a dirty working tree (`git status --porcelain`
+must be empty) and bakes the git **branch** and **commit** into the image, so
+each run logs which build it came from. The real image `sha256` ID is injected
+at runtime by `run.sh` (see below), since an image cannot contain its own ID.
 
 ### Prepare the data directory on your server
 
@@ -134,12 +141,19 @@ Create a wrapper script at `/opt/telegram-news-digest/run.sh`:
 
 ```bash
 #!/bin/bash
+IMAGE=telegram-ai-digest:latest
+IMAGE_HASH=$(docker image inspect "$IMAGE" --format '{{.Id}}')
+
 docker run --rm \
+  -e DIGEST_IMAGE_HASH="$IMAGE_HASH" \
   -v /opt/telegram-news-digest/.env:/app/.env:ro \
   -v /opt/telegram-news-digest/session.session:/app/session.session \
   -v /var/www/digest:/var/www/digest \
-  telegram-ai-digest >> /var/log/digest.log 2>&1
+  "$IMAGE" >> /var/log/digest.log 2>&1
 ```
+
+The container then logs a line like
+`Docker image: tag=... hash=sha256:ab12... branch=main commit=9f3c470` at the start of every run.
 
 Make it executable:
 
