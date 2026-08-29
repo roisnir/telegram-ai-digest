@@ -60,6 +60,30 @@ except ValueError as e:
     raise
 
 
+def _float_env(var_name: str, default: float) -> float:
+    raw = os.getenv(var_name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logging.warning(f"Invalid {var_name}={raw!r} — falling back to {default}")
+        return default
+
+
+# Optional operator alerting. Unset ALERT_CHAT_ID => the feature is entirely off.
+# Accepts a numeric Telegram user id, an '@username', or the literal 'me'
+# (the sending account's own Saved Messages).
+# NOTE: a Telegram bot cannot open a conversation with a user. If BOT_TOKEN is
+# set the alert is sent by the bot, which only works once the operator has
+# messaged that bot at least once (or if ALERT_CHAT_ID is a group/channel the
+# bot is in). Otherwise use the user session (leave BOT_TOKEN unset) or 'me'.
+ALERT_CHAT_ID = os.getenv('ALERT_CHAT_ID')
+# Percentage of source messages that must appear in the digest before a run is
+# considered healthy. Real runs land at 80-95%; the 2026-08-28 incident was 39%.
+COVERAGE_ALERT_THRESHOLD = _float_env('COVERAGE_ALERT_THRESHOLD', 60.0)
+
+
 # ---------------------------------------------------------------------------
 # Digest helpers (pure functions — no I/O, fully testable)
 # ---------------------------------------------------------------------------
@@ -897,10 +921,149 @@ async def fetch_messages(client, channel_username: str, start_date: datetime, en
 
 
 # ---------------------------------------------------------------------------
+# Operator alerts
+# ---------------------------------------------------------------------------
+
+_ALERT_ERROR_MAXLEN = 400
+
+
+def _coerce_chat_id(raw: str) -> int | str:
+    """Coerce a configured chat id to what Telethon expects.
+
+    Same convention as TARGET_CHANNEL: a bare (optionally negative) number is
+    passed as an int; anything else — '@username' or the literal 'me' — is
+    passed through as a string for Telethon to resolve.
+    """
+    raw = (raw or "").strip()
+    return int(raw) if raw.lstrip('-').isdigit() else raw
+
+
+def format_window(start_date: datetime | None, end_date: datetime | None) -> str:
+    """Human-readable local-time description of the window being processed."""
+    if end_date is None:
+        return "unknown window"
+    end_str = end_date.astimezone(LOCAL_TZ).strftime('%Y-%m-%d %H:%M')
+    if start_date is None:
+        return f"up to {end_str} Israel"
+    start_str = start_date.astimezone(LOCAL_TZ).strftime('%Y-%m-%d %H:%M')
+    return f"{start_str} -> {end_str} Israel"
+
+
+def check_digest_health(
+    digest: dict[str, Any],
+    source_map: dict,
+    threshold: float | None = None,
+) -> tuple[list[str], dict[str, Any]]:
+    """Return (issues, coverage) for a digest that is about to be published.
+
+    ``issues`` is empty for a healthy digest. Two independent signals:
+    poor coverage of the source messages, and an empty ``big_news`` section
+    despite there being source messages at all (the shape of the 2026-08-28
+    incident, where the model returned big_news as an unparseable string and
+    normalize_digest substituted an empty list).
+    """
+    if threshold is None:
+        threshold = COVERAGE_ALERT_THRESHOLD
+    cov = compute_coverage(digest, source_map)
+    issues: list[str] = []
+    total = cov["total"]
+    if total:
+        pct = 100.0 * cov["covered"] / total
+        if pct < threshold:
+            issues.append(f"coverage {pct:.0f}% is below the {threshold:.0f}% threshold")
+        if not digest.get("big_news"):
+            issues.append(f"no big_news stories despite {total} source messages")
+    return issues, cov
+
+
+def format_failure_alert(error: BaseException | str, window: str, stage: str = "") -> str:
+    """Short, phone-skimmable alert for a run that produced no digest."""
+    if isinstance(error, BaseException):
+        detail = f"{type(error).__name__}: {error}"
+    else:
+        detail = str(error)
+    if len(detail) > _ALERT_ERROR_MAXLEN:
+        detail = detail[:_ALERT_ERROR_MAXLEN] + "…"
+    lines = ["🚨 Digest run FAILED — nothing was published.", f"Window: {window}"]
+    if stage:
+        lines.append(f"Stage: {stage}")
+    lines.append(f"Error: {detail}")
+    return "\n".join(lines)
+
+
+def format_health_alert(
+    issues: list[str],
+    coverage: dict[str, Any],
+    window: str,
+    page_url: str | None = None,
+) -> str:
+    """Short, phone-skimmable alert for a digest that published but looks wrong."""
+    total = coverage.get("total", 0)
+    covered = coverage.get("covered", 0)
+    pct = (100.0 * covered / total) if total else 0.0
+    lines = [
+        "⚠️ Digest published but looks wrong.",
+        f"Window: {window}",
+        f"Coverage: {covered}/{total} ({pct:.0f}%)",
+    ]
+    lines += [f"• {issue}" for issue in issues]
+    if page_url:
+        lines.append(f"Page: {page_url}")
+    return "\n".join(lines)
+
+
+async def send_alert(text: str, client=None) -> bool:
+    """Best-effort operator alert. Never raises.
+
+    Off entirely when ALERT_CHAT_ID is unset. Prefers the bot when BOT_TOKEN is
+    set (see the note next to ALERT_CHAT_ID about bots not being able to DM
+    first), then a user session already connected by the caller, and finally a
+    freshly started user session.
+
+    Sent as plain text on purpose: the digest message uses parse_mode='html',
+    but alert bodies embed arbitrary exception text that would break HTML
+    parsing and silently drop the alert.
+    """
+    if not ALERT_CHAT_ID:
+        return False
+    bot = None
+    own_client = None
+    try:
+        target = _coerce_chat_id(ALERT_CHAT_ID)
+        if BOT_TOKEN:
+            bot = await TelegramClient(StringSession(), API_ID, API_HASH).start(bot_token=BOT_TOKEN)
+            sender = bot
+        elif client is not None:
+            sender = client
+        else:
+            own_client = TelegramClient('session', API_ID, API_HASH)
+            await own_client.start(phone=PHONE_NUMBER)
+            sender = own_client
+        await sender.send_message(target, text)
+        logging.info(f"Operator alert sent to {target}")
+        return True
+    except Exception as e:
+        logging.error(
+            f"Failed to send operator alert ({type(e).__name__}: {e}). "
+            f"Alert text was: {text}"
+        )
+        return False
+    finally:
+        for c in (bot, own_client):
+            if c is None:
+                continue
+            try:
+                await c.disconnect()
+            except Exception as e:
+                logging.warning(f"Failed to disconnect alert client: {e}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
-async def main() -> None:
+async def run_digest(ctx: dict[str, Any]) -> None:
+    """The digest pipeline. ``ctx`` collects state main() needs when alerting."""
     parser = argparse.ArgumentParser(description='Generate daily Telegram news update as HTML page.')
     parser.add_argument('--startdate', type=str, help='Start datetime YYYY-MM-DD or YYYY-MM-DD HH:MM (UTC)')
     parser.add_argument('--enddate', type=str, help='End datetime YYYY-MM-DD or YYYY-MM-DD HH:MM (UTC)')
@@ -923,6 +1086,7 @@ async def main() -> None:
         digest = normalize_digest(fixture_data['digest'])
         source_map = fixture_data.get('source_map', {})
         end_date = datetime.now(UTC)
+        ctx['window'] = format_window(None, end_date)
         logging.info(f"Loaded fixture: {args.fixture}")
     else:
         if args.startdate and args.enddate:
@@ -934,9 +1098,11 @@ async def main() -> None:
             end_date = datetime.now(UTC)
             start_date = end_date - timedelta(hours=12)
 
+        ctx['window'] = format_window(start_date, end_date)
         logging.info(f"Update period: {start_date} -> {end_date}")
 
         client = TelegramClient('session', API_ID, API_HASH)
+        ctx['client'] = client
         await client.start(phone=PHONE_NUMBER)
         logging.info("Connected to Telegram")
 
@@ -950,7 +1116,14 @@ async def main() -> None:
 
         if not messages_by_channel:
             # A quiet news window is not a failure — exit 0 so cron stays green.
+            # The operator still gets no digest though, so say so — that is
+            # exactly the "no digests arrived and nobody noticed" mode.
             logging.warning("No messages fetched from any channel — nothing to publish.")
+            await send_alert(
+                f"⚠️ No digest published.\nWindow: {ctx['window']}\n"
+                "No messages were fetched from any channel — quiet window, or a broken fetch.",
+                client,
+            )
             await client.disconnect()
             return
 
@@ -962,6 +1135,15 @@ async def main() -> None:
             # max_tokens truncation, and a missing tool_use block. Nothing is
             # published, and the process exits non-zero so cron/run.sh notice.
             logging.error("Failed to generate update — nothing published.")
+            await send_alert(
+                format_failure_alert(
+                    "create_digest() returned no digest — output truncated at max_tokens, "
+                    "or no tool_use block came back. See the run log.",
+                    ctx['window'],
+                    stage="claude",
+                ),
+                client,
+            )
             await client.disconnect()
             raise SystemExit(1)
 
@@ -990,8 +1172,31 @@ async def main() -> None:
         else:
             await client.send_message(target, message, parse_mode='html')
 
+    issues, coverage = check_digest_health(digest, source_map)
+    if issues:
+        logging.warning(f"Digest published but looks wrong: {'; '.join(issues)}")
+        await send_alert(
+            format_health_alert(issues, coverage, ctx.get('window', 'unknown window'), page_url),
+            ctx.get('client'),
+        )
+
     if not args.fixture:
         await client.disconnect()
+        ctx['client'] = None
+
+
+async def main() -> None:
+    """Run the digest, alerting the operator on failure. Re-raises after alerting."""
+    ctx: dict[str, Any] = {}
+    try:
+        await run_digest(ctx)
+    except Exception as e:
+        logging.error(f"Digest run failed: {type(e).__name__}: {e}")
+        await send_alert(
+            format_failure_alert(e, ctx.get('window', 'unknown window')),
+            ctx.get('client'),
+        )
+        raise
 
 
 if __name__ == "__main__":
