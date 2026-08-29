@@ -13,6 +13,7 @@ from digest import (
     build_channel_sources,
     compute_channel_stats,
     compute_coverage,
+    classify_ad_messages,
     _channel_of_link,
     extract_media_info,
     extract_external_links,
@@ -797,6 +798,84 @@ class TestComputeChannelStats:
 # Coverage diagnostics (bottom block)
 # ---------------------------------------------------------------------------
 
+class TestAdMessageClassification:
+    """Ad Message detection (CONTEXT.md): disclosure marker + the body after it."""
+
+    MARKER = "**°תוכן שיווקי**"
+    POLITICAL_MARKER = "**°תוכן פוליטי במימון המטה הלאומי של פורום הניצחון**"
+    AD_BODY = "🌙 חלומות מתוקים מתחילים עם כרית קמומיל לילדים 🌼"
+
+    def test_marker_message_is_ad(self):
+        source_map = {"https://t.me/abualiexpress/1": {"text": self.MARKER, "ts": 1.0}}
+        assert classify_ad_messages(source_map) == {"https://t.me/abualiexpress/1"}
+
+    def test_political_funding_marker_is_ad(self):
+        source_map = {"https://t.me/abualiexpress/1": {"text": self.POLITICAL_MARKER, "ts": 1.0}}
+        assert classify_ad_messages(source_map) == {"https://t.me/abualiexpress/1"}
+
+    def test_marker_and_following_body_are_both_ads(self):
+        source_map = {
+            "https://t.me/abualiexpress/1": {"text": self.MARKER, "ts": 1.0},
+            "https://t.me/abualiexpress/2": {"text": self.AD_BODY, "ts": 2.0},
+        }
+        assert classify_ad_messages(source_map) == {
+            "https://t.me/abualiexpress/1",
+            "https://t.me/abualiexpress/2",
+        }
+
+    def test_adjacency_does_not_chain_to_third_message(self):
+        source_map = {
+            "https://t.me/abualiexpress/1": {"text": self.MARKER, "ts": 1.0},
+            "https://t.me/abualiexpress/2": {"text": self.AD_BODY, "ts": 2.0},
+            "https://t.me/abualiexpress/3": {"text": "דובר צה\"ל: תקיפה בג'נין", "ts": 3.0},
+        }
+        assert "https://t.me/abualiexpress/3" not in classify_ad_messages(source_map)
+
+    def test_adjacency_does_not_cross_channels(self):
+        source_map = {
+            "https://t.me/abualiexpress/1": {"text": self.MARKER, "ts": 1.0},
+            "https://t.me/amitsegal/5": {"text": "ידיעה פוליטית", "ts": 2.0},
+        }
+        assert classify_ad_messages(source_map) == {"https://t.me/abualiexpress/1"}
+
+    def test_adjacency_uses_timestamp_order_not_dict_order(self):
+        source_map = {
+            "https://t.me/abualiexpress/2": {"text": self.AD_BODY, "ts": 2.0},
+            "https://t.me/abualiexpress/1": {"text": self.MARKER, "ts": 1.0},
+        }
+        assert "https://t.me/abualiexpress/2" in classify_ad_messages(source_map)
+
+    def test_message_before_marker_is_not_an_ad(self):
+        source_map = {
+            "https://t.me/abualiexpress/1": {"text": "ידיעה אמיתית", "ts": 1.0},
+            "https://t.me/abualiexpress/2": {"text": self.MARKER, "ts": 2.0},
+        }
+        assert classify_ad_messages(source_map) == {"https://t.me/abualiexpress/2"}
+
+    def test_plain_news_message_is_not_an_ad(self):
+        source_map = {
+            "https://t.me/amitsegal/1": {"text": "הכלל פשוט: 15 גברים ייכנסו.", "ts": 1.0},
+        }
+        assert classify_ad_messages(source_map) == set()
+
+    def test_marker_words_deep_in_body_are_ignored(self):
+        # A real story that merely mentions marketing far past the opening.
+        text = "כתבה ארוכה על שוק הפרסום. " * 10 + "תוכן שיווקי הוא מנוע צמיחה."
+        source_map = {"https://t.me/amitsegal/1": {"text": text, "ts": 1.0}}
+        assert classify_ad_messages(source_map) == set()
+
+    def test_missing_and_empty_text_is_not_an_ad(self):
+        source_map = {
+            "https://t.me/alpha/1": {"ts": 1.0},
+            "https://t.me/alpha/2": {"text": "", "ts": 2.0},
+            "https://t.me/alpha/3": {"text": None, "ts": 3.0},
+        }
+        assert classify_ad_messages(source_map) == set()
+
+    def test_empty_source_map(self):
+        assert classify_ad_messages({}) == set()
+
+
 class TestComputeCoverage:
     def test_one_unreferenced_link_classified_uncovered(self):
         digest = {
@@ -869,6 +948,85 @@ class TestComputeCoverage:
         assert cov["total"] == 0
         assert cov["per_channel"] == {}
         assert cov["uncovered"] == []
+        assert cov["uncovered_ads"] == []
+        assert cov["uncovered_real"] == []
+        assert cov["ads"] == 0
+        assert cov["real_covered"] == 0
+        assert cov["real_total"] == 0
+
+    def test_uncovered_split_into_ads_and_real(self):
+        digest = {"big_news": [], "minor_news": []}
+        source_map = {
+            "https://t.me/abualiexpress/1": {"text": "**°תוכן שיווקי**", "ts": 1.0},
+            "https://t.me/abualiexpress/2": {"text": "כרית קמומיל לילדים", "ts": 2.0},
+            "https://t.me/abualiexpress/3": {"text": "תקיפה בג'נין", "ts": 3.0},
+        }
+        cov = compute_coverage(digest, source_map)
+        assert cov["uncovered_ads"] == [
+            "https://t.me/abualiexpress/1",
+            "https://t.me/abualiexpress/2",
+        ]
+        assert cov["uncovered_real"] == ["https://t.me/abualiexpress/3"]
+        # the split partitions uncovered exactly
+        assert len(cov["uncovered_ads"]) + len(cov["uncovered_real"]) == len(cov["uncovered"])
+
+    def test_raw_coverage_numbers_unchanged_by_ads(self):
+        digest = {"big_news": [], "minor_news": []}
+        source_map = {
+            "https://t.me/abualiexpress/1": {"text": "**°תוכן שיווקי**", "ts": 1.0},
+            "https://t.me/abualiexpress/2": {"text": "כרית קמומיל לילדים", "ts": 2.0},
+            "https://t.me/abualiexpress/3": {"text": "תקיפה בג'נין", "ts": 3.0},
+        }
+        cov = compute_coverage(digest, source_map)
+        assert cov["covered"] == 0
+        assert cov["total"] == 3
+        assert cov["per_channel"]["abualiexpress"] == {"covered": 0, "total": 3}
+
+    def test_real_coverage_excludes_ads(self):
+        digest = {
+            "big_news": [{"links": ["https://t.me/abualiexpress/3"], "section": "conflict"}],
+            "minor_news": [],
+        }
+        source_map = {
+            "https://t.me/abualiexpress/1": {"text": "**°תוכן שיווקי**", "ts": 1.0},
+            "https://t.me/abualiexpress/2": {"text": "כרית קמומיל לילדים", "ts": 2.0},
+            "https://t.me/abualiexpress/3": {"text": "תקיפה בג'נין", "ts": 3.0},
+            "https://t.me/abualiexpress/4": {"text": "ידיעה שנשמטה", "ts": 4.0},
+        }
+        cov = compute_coverage(digest, source_map)
+        assert cov["ads"] == 2
+        assert (cov["covered"], cov["total"]) == (1, 4)          # raw: 25%
+        assert (cov["real_covered"], cov["real_total"]) == (1, 2)  # adjusted: 50%
+        assert cov["uncovered_real"] == ["https://t.me/abualiexpress/4"]
+
+    def test_ad_that_was_covered_counts_as_ad_not_real(self):
+        digest = {
+            "big_news": [{"links": ["https://t.me/abualiexpress/1"], "section": "world"}],
+            "minor_news": [],
+        }
+        source_map = {
+            "https://t.me/abualiexpress/1": {"text": "**°תוכן שיווקי**", "ts": 1.0},
+            "https://t.me/abualiexpress/2": {"text": "כרית קמומיל לילדים", "ts": 2.0},
+        }
+        cov = compute_coverage(digest, source_map)
+        assert cov["ads"] == 2
+        assert cov["real_total"] == 0
+        assert cov["uncovered_real"] == []
+        assert cov["uncovered_ads"] == ["https://t.me/abualiexpress/2"]
+
+    def test_all_uncovered_are_ads(self):
+        digest = {
+            "big_news": [{"links": ["https://t.me/abualiexpress/3"], "section": "conflict"}],
+            "minor_news": [],
+        }
+        source_map = {
+            "https://t.me/abualiexpress/1": {"text": "**°תוכן שיווקי**", "ts": 1.0},
+            "https://t.me/abualiexpress/2": {"text": "כרית קמומיל לילדים", "ts": 2.0},
+            "https://t.me/abualiexpress/3": {"text": "תקיפה בג'נין", "ts": 3.0},
+        }
+        cov = compute_coverage(digest, source_map)
+        assert cov["uncovered_real"] == []
+        assert (cov["real_covered"], cov["real_total"]) == (1, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -931,8 +1089,8 @@ class TestHtmlStatsAndCoverageBlocks:
 
     def test_uncovered_details_lists_clickable_link(self):
         page = build_html_page(self.DIGEST, self._source_map(True), self.END_DATE)
-        assert "<details>" in page
-        assert "1 הודעות שלא סוקרו" in page
+        assert "<details" in page
+        assert "1 הודעות תוכן שלא סוקרו" in page
         assert 'href="https://t.me/beta/10"' in page
         assert "סוקרו 2 מתוך 3 הודעות" in page
 
@@ -940,6 +1098,64 @@ class TestHtmlStatsAndCoverageBlocks:
         page = build_html_page(self.DIGEST, {}, self.END_DATE)
         assert 'class="channel-stats"' not in page
         assert 'class="diagnostics"' not in page
+
+    MARKER = "**°תוכן שיווקי**"
+
+    def _source_map_with(self, extras):
+        sm = self._source_map(False)
+        sm.update(extras)
+        return sm
+
+    def test_ad_only_uncovered_shows_no_warning(self):
+        sm = self._source_map_with({
+            "https://t.me/abualiexpress/1": {"text": self.MARKER, "ts": 3.0, "time": "07:00", "external_links": []},
+            "https://t.me/abualiexpress/2": {"text": "כרית קמומיל לילדים", "ts": 4.0, "time": "07:02", "external_links": []},
+        })
+        page = build_html_page(self.DIGEST, sm, self.END_DATE)
+        assert 'class="diagnostics-warning"' not in page
+        assert "2 הודעות שיווקיות שדולגו (כצפוי)" in page
+        assert "כל הודעות התוכן סוקרו בעדכון. ✓" in page
+
+    def test_ad_group_is_expandable_not_hidden(self):
+        sm = self._source_map_with({
+            "https://t.me/abualiexpress/1": {"text": self.MARKER, "ts": 3.0, "time": "07:00", "external_links": []},
+        })
+        page = build_html_page(self.DIGEST, sm, self.END_DATE)
+        assert '<details class="uncovered-ads">' in page
+        assert 'href="https://t.me/abualiexpress/1"' in page
+
+    def test_real_uncovered_shows_warning(self):
+        page = build_html_page(self.DIGEST, self._source_map(True), self.END_DATE)
+        assert 'class="diagnostics-warning"' in page
+        assert "1 הודעות תוכן לא סוקרו בעדכון" in page
+        assert '<details class="uncovered-real" open>' in page
+
+    def test_mixed_uncovered_renders_both_groups(self):
+        sm = self._source_map_with({
+            "https://t.me/beta/10": {"text": "ידיעה שנשמטה", "ts": 3.0, "time": "07:00", "external_links": []},
+            "https://t.me/abualiexpress/1": {"text": self.MARKER, "ts": 4.0, "time": "07:05", "external_links": []},
+            "https://t.me/abualiexpress/2": {"text": "כרית קמומיל לילדים", "ts": 5.0, "time": "07:07", "external_links": []},
+        })
+        page = build_html_page(self.DIGEST, sm, self.END_DATE)
+        assert 'class="diagnostics-warning"' in page
+        assert "1 הודעות תוכן שלא סוקרו" in page
+        assert "2 הודעות שיווקיות שדולגו (כצפוי)" in page
+        # the dropped story is listed in the real group, above the ad group
+        assert page.index('class="uncovered-real"') < page.index('class="uncovered-ads"')
+
+    def test_raw_and_adjusted_coverage_lines_both_present(self):
+        sm = self._source_map_with({
+            "https://t.me/abualiexpress/1": {"text": self.MARKER, "ts": 3.0, "time": "07:00", "external_links": []},
+            "https://t.me/abualiexpress/2": {"text": "כרית קמומיל לילדים", "ts": 4.0, "time": "07:02", "external_links": []},
+        })
+        page = build_html_page(self.DIGEST, sm, self.END_DATE)
+        assert "סוקרו 2 מתוך 4 הודעות" in page                       # raw, unchanged
+        assert "כיסוי תוכן: סוקרו 2 מתוך 2 הודעות, ללא 2 הודעות שיווקיות" in page
+
+    def test_adjusted_line_omitted_when_no_ads(self):
+        page = build_html_page(self.DIGEST, self._source_map(False), self.END_DATE)
+        assert "כיסוי תוכן:" not in page
+        assert "כל ההודעות סוקרו בעדכון. ✓" in page
 
 
 # ---------------------------------------------------------------------------
