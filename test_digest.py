@@ -1,11 +1,13 @@
 import asyncio
 import json
+import logging
 import pytest
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 from pytz import UTC, timezone
 
 from digest import (
+    DigestParseError,
     normalize_digest,
     time_of_day_label,
     format_telegram_message,
@@ -100,10 +102,47 @@ class TestNormalizeDigest:
         assert len(result["big_news"]) == 1
         assert result["big_news"][0]["headline"] == "good"
 
-    def test_invalid_json_string_becomes_empty_list(self):
+    def test_invalid_json_string_raises_instead_of_dropping_section(self):
+        """Regression for the 2026-08-28 incident: an unparseable array field used
+        to become [], gutting the digest, which was then published silently."""
         data = {"date_range": "...", "big_news": "not valid json {{{", "minor_news": []}
-        result = normalize_digest(data)
-        assert result["big_news"] == []
+        with pytest.raises(DigestParseError):
+            normalize_digest(data)
+
+    def test_parse_error_names_the_field_and_shows_the_value(self):
+        data = {"date_range": "...", "big_news": "not valid json {{{", "minor_news": []}
+        with pytest.raises(DigestParseError) as exc:
+            normalize_digest(data)
+        assert "big_news" in str(exc.value)
+        assert "not valid json" in str(exc.value)
+
+    def test_parse_error_truncates_a_huge_offending_value(self):
+        data = {"date_range": "...", "big_news": "x" * 5000, "minor_news": []}
+        with pytest.raises(DigestParseError) as exc:
+            normalize_digest(data)
+        message = str(exc.value)
+        assert len(message) < 1000
+        assert "5000 chars total" in message
+
+    def test_unparseable_minor_news_also_raises(self):
+        data = {"date_range": "...", "big_news": [], "minor_news": "{oops"}
+        with pytest.raises(DigestParseError) as exc:
+            normalize_digest(data)
+        assert "minor_news" in str(exc.value)
+
+    def test_non_list_json_string_raises(self):
+        """Valid JSON that isn't an array is just as unusable as invalid JSON."""
+        data = {"date_range": "...", "big_news": '{"headline": "h"}', "minor_news": []}
+        with pytest.raises(DigestParseError) as exc:
+            normalize_digest(data)
+        assert "big_news" in str(exc.value)
+
+    def test_parse_error_logged_at_error_level(self, caplog):
+        data = {"date_range": "...", "big_news": "not valid json {{{", "minor_news": []}
+        with caplog.at_level(logging.ERROR):
+            with pytest.raises(DigestParseError):
+                normalize_digest(data)
+        assert any(r.levelno == logging.ERROR and "big_news" in r.getMessage() for r in caplog.records)
 
     def test_missing_keys_default_to_empty_list(self):
         result = normalize_digest({"date_range": "..."})
@@ -1065,6 +1104,23 @@ def _anthropic_stub(big_news=None, minor_news=None, date_range="2026-05-13 10:00
     return resp
 
 
+def _anthropic_stub_raw(big_news, minor_news=None, date_range="2026-05-13 10:00 - 2026-05-13 12:00 Israel"):
+    """Like _anthropic_stub but passes the tool_use input through verbatim, so a
+    test can reproduce a malformed field (e.g. big_news as an unparseable string)."""
+    block = Mock()
+    block.type = "tool_use"
+    block.input = {
+        "date_range": date_range,
+        "big_news": big_news,
+        "minor_news": [] if minor_news is None else minor_news,
+    }
+    resp = Mock()
+    resp.content = [block]
+    resp.stop_reason = "tool_use"
+    resp.usage = Mock(output_tokens=1234)
+    return resp
+
+
 # ---------------------------------------------------------------------------
 # fetch_messages integration (mocks only Telethon network calls)
 # ---------------------------------------------------------------------------
@@ -1232,6 +1288,28 @@ class TestCreateDigestIntegration:
             result = asyncio.run(create_digest({"ch": ["msg"]}, self.START, self.END))
         assert result is None
 
+    def test_unparseable_big_news_returns_none(self):
+        """The 2026-08-28 failure mode, at the create_digest boundary."""
+        resp = _anthropic_stub_raw(big_news='[{"headline": "כותרת", ')
+        p, _ = self._patch_ac(resp)
+        with p:
+            result = asyncio.run(create_digest({"ch": ["msg"]}, self.START, self.END))
+        assert result is None
+
+    def test_valid_json_string_big_news_still_parses(self):
+        """The legitimate SDK quirk this defensive branch exists for must still work."""
+        resp = _anthropic_stub_raw(big_news=json.dumps([{
+            "headline": "כותרת", "summary": "סיכום",
+            "links": ["https://t.me/ch/1"],
+            "section": "conflict", "source": "@ch", "time": "08:00",
+        }]))
+        p, _ = self._patch_ac(resp)
+        with p:
+            result = asyncio.run(create_digest({"ch": ["msg"]}, self.START, self.END))
+        assert result is not None
+        assert result["big_news"][0]["headline"] == "כותרת"
+        assert result["big_news"][0]["links"] == ["https://t.me/ch/1"]
+
     def test_near_limit_diagnostics_true(self):
         resp = _anthropic_stub(big_news=[{
             "headline": "כותרת", "summary": "סיכום",
@@ -1299,13 +1377,14 @@ class TestMainPipeline:
     IN_WINDOW   = datetime(2026, 5, 13, 10, 0, tzinfo=UTC)
     _DATE_ARGS  = ['--startdate', '2026-05-13 08:00', '--enddate', '2026-05-13 12:00']
 
-    def _setup(self, messages, big_news=None):
+    def _setup(self, messages, big_news=None, resp=None):
         mock_tg = _mock_tg_client(messages)
-        resp = _anthropic_stub(big_news=big_news or [{
-            "headline": "כותרת", "summary": "סיכום",
-            "links": ["https://t.me/ch/100"],
-            "section": "conflict", "source": "@ch", "time": "10:00",
-        }])
+        if resp is None:
+            resp = _anthropic_stub(big_news=big_news or [{
+                "headline": "כותרת", "summary": "סיכום",
+                "links": ["https://t.me/ch/100"],
+                "section": "conflict", "source": "@ch", "time": "10:00",
+            }])
         mock_ac = AsyncMock()
         inner = MagicMock()
         inner.get_final_message = AsyncMock(return_value=resp)
@@ -1352,3 +1431,62 @@ class TestMainPipeline:
             asyncio.run(main())
 
         mock_tg.send_message.assert_called_once()
+
+    def _run_expecting_failure(self, tmp_path, resp):
+        """Run the full pipeline with a broken Claude response; return the output path."""
+        msg = _tg_msg(100, text="חדשות", dt=self.IN_WINDOW)
+        mock_tg, mock_ac = self._setup([msg], resp=resp)
+        output = str(tmp_path / "out.html")
+
+        with patch('digest.TelegramClient', return_value=mock_tg), \
+             patch('digest.anthropic.AsyncAnthropic', return_value=mock_ac), \
+             patch('sys.argv', ['digest.py', '--output', output] + self._DATE_ARGS):
+            with pytest.raises(SystemExit) as exc:
+                asyncio.run(main())
+
+        assert exc.value.code != 0
+        return mock_tg, tmp_path / "out.html"
+
+    def test_unparseable_digest_exits_nonzero_without_publishing(self, tmp_path):
+        """The 2026-08-28 incident end-to-end: no HTML page, no Telegram post, exit 1."""
+        resp = _anthropic_stub_raw(big_news='[{"headline": "כותרת", ')
+        mock_tg, html_path = self._run_expecting_failure(tmp_path, resp)
+
+        assert not html_path.exists()
+        mock_tg.send_message.assert_not_called()
+        mock_tg.disconnect.assert_awaited()
+
+    def test_max_tokens_truncation_exits_nonzero_without_publishing(self, tmp_path):
+        resp = _anthropic_stub(big_news=[{
+            "headline": "כותרת", "summary": "סיכום",
+            "links": ["https://t.me/ch/100"],
+            "section": "conflict", "source": "@ch", "time": "10:00",
+        }])
+        resp.stop_reason = "max_tokens"
+        mock_tg, html_path = self._run_expecting_failure(tmp_path, resp)
+
+        assert not html_path.exists()
+        mock_tg.send_message.assert_not_called()
+
+    def test_missing_tool_use_block_exits_nonzero_without_publishing(self, tmp_path):
+        resp = Mock()
+        resp.content = []
+        resp.stop_reason = "end_turn"
+        resp.usage = Mock(output_tokens=10)
+        mock_tg, html_path = self._run_expecting_failure(tmp_path, resp)
+
+        assert not html_path.exists()
+        mock_tg.send_message.assert_not_called()
+
+    def test_no_messages_is_not_a_failure_and_exits_zero(self, tmp_path):
+        """A quiet news window is a legitimate empty result, not an error."""
+        mock_tg, mock_ac = self._setup([])
+        output = str(tmp_path / "out.html")
+
+        with patch('digest.TelegramClient', return_value=mock_tg), \
+             patch('digest.anthropic.AsyncAnthropic', return_value=mock_ac), \
+             patch('sys.argv', ['digest.py', '--output', output] + self._DATE_ARGS):
+            asyncio.run(main())  # must not raise SystemExit
+
+        assert not (tmp_path / "out.html").exists()
+        mock_tg.send_message.assert_not_called()

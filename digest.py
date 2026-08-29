@@ -64,21 +64,47 @@ except ValueError as e:
 # Digest helpers (pure functions — no I/O, fully testable)
 # ---------------------------------------------------------------------------
 
+class DigestParseError(Exception):
+    """The model's tool output could not be parsed into the expected digest shape.
+
+    Raised instead of silently dropping a section: an unparseable ``big_news`` /
+    ``minor_news`` field means the digest is incomplete, and an incomplete digest
+    must never be published.
+    """
+
+
+def _truncated(value: Any, limit: int = 500) -> str:
+    """Render a possibly huge offending value for a log line / exception message."""
+    text = value if isinstance(value, str) else repr(value)
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}… ({len(text)} chars total)"
+
+
 def normalize_digest(data: dict[str, Any]) -> dict[str, Any]:
     """
     Ensures big_news/minor_news are lists of dicts.
     The SDK may return array fields as a JSON string when the model doesn't
     strictly follow the tool schema.
     Also normalises each item's `links` field: a bare string becomes a one-element list.
+
+    Raises DigestParseError if a required array field cannot be read as a list.
     """
     for key in ("big_news", "minor_news"):
         val = data.get(key, [])
         if isinstance(val, str):
             try:
                 val = json.loads(val)
-            except json.JSONDecodeError:
-                logging.warning(f"Could not parse '{key}' as JSON, using empty list")
-                val = []
+            except json.JSONDecodeError as e:
+                snippet = _truncated(val)
+                logging.error("Could not parse '%s' as JSON (%s): %s", key, e, snippet)
+                raise DigestParseError(f"Could not parse '{key}' as JSON: {snippet}") from e
+        if not isinstance(val, list):
+            snippet = _truncated(val)
+            logging.error("Field '%s' is not a list (got %s): %s", key, type(val).__name__, snippet)
+            raise DigestParseError(
+                f"Field '{key}' is not a list (got {type(val).__name__}): {snippet}"
+            )
         normalized = []
         for item in val:
             if not isinstance(item, dict):
@@ -283,7 +309,11 @@ async def create_digest(
 
     for block in response.content:
         if block.type == "tool_use":
-            digest = normalize_digest(dict(block.input))
+            try:
+                digest = normalize_digest(dict(block.input))
+            except DigestParseError as e:
+                logging.error("Unusable digest from Claude — refusing to publish: %s", e)
+                return None
             digest["_diagnostics"] = {
                 "output_tokens": output_tokens,
                 "max_output_tokens": MAX_OUTPUT_TOKENS,
@@ -801,7 +831,8 @@ async def main() -> None:
             source_map.update(channel_source_map)
 
         if not messages_by_channel:
-            logging.error("No messages fetched from any channel.")
+            # A quiet news window is not a failure — exit 0 so cron stays green.
+            logging.warning("No messages fetched from any channel — nothing to publish.")
             await client.disconnect()
             return
 
@@ -809,9 +840,12 @@ async def main() -> None:
         digest = await create_digest(messages_by_channel, start_date, end_date)
 
         if not digest:
-            logging.error("Failed to generate update.")
+            # Covers every generation failure: unparseable tool output,
+            # max_tokens truncation, and a missing tool_use block. Nothing is
+            # published, and the process exits non-zero so cron/run.sh notice.
+            logging.error("Failed to generate update — nothing published.")
             await client.disconnect()
-            return
+            raise SystemExit(1)
 
     html_content = build_html_page(digest, source_map, end_date)
 
