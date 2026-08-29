@@ -19,6 +19,12 @@ from digest import (
     fetch_messages,
     create_digest,
     main,
+    send_alert,
+    check_digest_health,
+    format_window,
+    format_failure_alert,
+    format_health_alert,
+    _coerce_chat_id,
     LOCAL_TZ,
 )
 
@@ -1267,3 +1273,387 @@ class TestMainPipeline:
             asyncio.run(main())
 
         mock_tg.send_message.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Operator alerting — pure helpers
+# ---------------------------------------------------------------------------
+
+class TestCoerceChatId:
+    def test_numeric_id_becomes_int(self):
+        assert _coerce_chat_id("123456789") == 123456789
+
+    def test_negative_channel_id_becomes_int(self):
+        assert _coerce_chat_id("-1001234567890") == -1001234567890
+
+    def test_username_passed_through(self):
+        assert _coerce_chat_id("@operator") == "@operator"
+
+    def test_me_passed_through(self):
+        assert _coerce_chat_id("me") == "me"
+
+    def test_surrounding_whitespace_stripped(self):
+        assert _coerce_chat_id("  42  ") == 42
+        assert _coerce_chat_id("  me  ") == "me"
+
+    def test_matches_target_channel_convention(self):
+        # digest.py coerces TARGET_CHANNEL with the same isdigit()/lstrip('-') rule.
+        for raw in ("-1001234567890", "42", "@chan", "me"):
+            expected = int(raw) if raw.lstrip('-').isdigit() else raw
+            assert _coerce_chat_id(raw) == expected
+
+
+class TestFormatWindow:
+    def test_start_and_end(self):
+        w = format_window(datetime(2026, 8, 28, 4, 0, tzinfo=UTC),
+                          datetime(2026, 8, 28, 16, 0, tzinfo=UTC))
+        assert "2026-08-28 07:00" in w and "2026-08-28 19:00" in w and "Israel" in w
+
+    def test_end_only(self):
+        w = format_window(None, datetime(2026, 8, 28, 16, 0, tzinfo=UTC))
+        assert w.startswith("up to") and "2026-08-28 19:00" in w
+
+    def test_unknown(self):
+        assert format_window(None, None) == "unknown window"
+
+
+class TestCheckDigestHealth:
+    SOURCE_MAP = {f"https://t.me/ch/{i}": {"text": "t", "media_type": None,
+                                           "video_duration": None, "external_links": [],
+                                           "time": "08:00", "ts": float(i)}
+                  for i in range(1, 11)}
+
+    def _digest(self, covered_ids):
+        return {"big_news": [{"headline": "h", "section": "conflict",
+                              "links": [f"https://t.me/ch/{i}" for i in covered_ids]}],
+                "minor_news": []}
+
+    def test_healthy_digest_has_no_issues(self):
+        issues, cov = check_digest_health(self._digest(range(1, 10)), self.SOURCE_MAP, threshold=60)
+        assert issues == []
+        assert (cov["covered"], cov["total"]) == (9, 10)
+
+    def test_low_coverage_flagged(self):
+        issues, cov = check_digest_health(self._digest([1, 2, 3]), self.SOURCE_MAP, threshold=60)
+        assert len(issues) == 1
+        assert "30%" in issues[0] and "60%" in issues[0]
+
+    def test_coverage_exactly_at_threshold_is_healthy(self):
+        issues, _ = check_digest_health(self._digest(range(1, 7)), self.SOURCE_MAP, threshold=60)
+        assert issues == []
+
+    def test_empty_big_news_flagged_independently(self):
+        # 100% coverage from minor_news alone, but no big_news at all.
+        digest = {"big_news": [],
+                  "minor_news": [{"headline": "m", "section": "world",
+                                  "links": list(self.SOURCE_MAP)}]}
+        issues, _ = check_digest_health(digest, self.SOURCE_MAP, threshold=60)
+        assert len(issues) == 1
+        assert "no big_news" in issues[0] and "10 source messages" in issues[0]
+
+    def test_incident_shape_flags_both(self):
+        # 2026-08-28: 39% coverage and zero big_news.
+        digest = {"big_news": [],
+                  "minor_news": [{"headline": "m", "section": "world",
+                                  "links": [f"https://t.me/ch/{i}" for i in range(1, 4)]}]}
+        issues, _ = check_digest_health(digest, self.SOURCE_MAP, threshold=60)
+        assert len(issues) == 2
+
+    def test_empty_source_map_never_alerts(self):
+        issues, cov = check_digest_health({"big_news": [], "minor_news": []}, {}, threshold=60)
+        assert issues == []
+        assert cov["total"] == 0
+
+    def test_threshold_defaults_to_module_constant(self):
+        with patch('digest.COVERAGE_ALERT_THRESHOLD', 95.0):
+            issues, _ = check_digest_health(self._digest(range(1, 10)), self.SOURCE_MAP)
+        assert len(issues) == 1
+
+
+class TestAlertFormatting:
+    def test_failure_alert_has_type_message_and_window(self):
+        err = ValueError("Your credit balance is too low")
+        text = format_failure_alert(err, "2026-08-26 07:00 -> 19:00 Israel", stage="claude")
+        assert "ValueError" in text
+        assert "Your credit balance is too low" in text
+        assert "2026-08-26 07:00" in text
+        assert "claude" in text
+
+    def test_failure_alert_accepts_plain_string(self):
+        text = format_failure_alert("no tool_use block", "w")
+        assert "no tool_use block" in text
+
+    def test_failure_alert_truncates_long_error(self):
+        text = format_failure_alert("x" * 5000, "w")
+        assert len(text) < 700
+        assert text.endswith("…")
+
+    def test_health_alert_has_numbers_issues_and_url(self):
+        cov = {"covered": 21, "total": 54, "per_channel": {}, "uncovered": []}
+        text = format_health_alert(["coverage 39% is below the 60% threshold"], cov,
+                                   "2026-08-28 07:00 -> 19:00 Israel",
+                                   "https://example.com/d.html")
+        assert "21/54" in text and "39%" in text
+        assert "https://example.com/d.html" in text
+        assert "2026-08-28" in text
+
+    def test_health_alert_without_url(self):
+        cov = {"covered": 0, "total": 3, "per_channel": {}, "uncovered": []}
+        text = format_health_alert(["no big_news stories despite 3 source messages"], cov, "w")
+        assert "Page:" not in text
+
+    def test_alerts_stay_phone_sized(self):
+        cov = {"covered": 21, "total": 54, "per_channel": {}, "uncovered": []}
+        text = format_health_alert(["a" * 60, "b" * 60], cov, "w", "https://example.com/d.html")
+        assert len(text) < 500
+
+
+# ---------------------------------------------------------------------------
+# send_alert (mocks Telethon at the network boundary)
+# ---------------------------------------------------------------------------
+
+def _bot_factory():
+    """Mock for `TelegramClient(StringSession(), ...).start(bot_token=...)`."""
+    bot = AsyncMock()
+    factory = MagicMock()
+    factory.start = AsyncMock(return_value=bot)
+    return factory, bot
+
+
+class TestSendAlert:
+    def test_noop_when_alert_chat_id_unset(self):
+        client = AsyncMock()
+        with patch('digest.ALERT_CHAT_ID', None), patch('digest.BOT_TOKEN', None), \
+             patch('digest.TelegramClient') as tg:
+            assert asyncio.run(send_alert("boom", client)) is False
+        client.send_message.assert_not_called()
+        tg.assert_not_called()
+
+    def test_noop_when_alert_chat_id_empty_string(self):
+        with patch('digest.ALERT_CHAT_ID', ''), patch('digest.TelegramClient') as tg:
+            assert asyncio.run(send_alert("boom")) is False
+        tg.assert_not_called()
+
+    def test_sends_via_bot_when_bot_token_set(self):
+        factory, bot = _bot_factory()
+        client = AsyncMock()
+        with patch('digest.ALERT_CHAT_ID', '123456'), patch('digest.BOT_TOKEN', 'tok'), \
+             patch('digest.TelegramClient', return_value=factory):
+            assert asyncio.run(send_alert("boom", client)) is True
+        bot.send_message.assert_awaited_once_with(123456, "boom")
+        bot.disconnect.assert_awaited_once()
+        client.send_message.assert_not_called()
+
+    def test_sends_via_supplied_user_client_without_bot_token(self):
+        client = AsyncMock()
+        with patch('digest.ALERT_CHAT_ID', '@operator'), patch('digest.BOT_TOKEN', None), \
+             patch('digest.TelegramClient') as tg:
+            assert asyncio.run(send_alert("boom", client)) is True
+        client.send_message.assert_awaited_once_with("@operator", "boom")
+        # The caller still owns the session it passed in.
+        client.disconnect.assert_not_called()
+        tg.assert_not_called()
+
+    def test_starts_own_user_session_when_no_client_and_no_bot(self):
+        own = AsyncMock()
+        with patch('digest.ALERT_CHAT_ID', 'me'), patch('digest.BOT_TOKEN', None), \
+             patch('digest.TelegramClient', return_value=own):
+            assert asyncio.run(send_alert("boom")) is True
+        own.start.assert_awaited_once()
+        own.send_message.assert_awaited_once_with("me", "boom")
+        own.disconnect.assert_awaited_once()
+
+    def test_send_failure_is_logged_and_swallowed(self, caplog):
+        client = AsyncMock()
+        client.send_message = AsyncMock(side_effect=RuntimeError("peer not found"))
+        with patch('digest.ALERT_CHAT_ID', '123'), patch('digest.BOT_TOKEN', None):
+            with caplog.at_level('ERROR'):
+                assert asyncio.run(send_alert("boom", client)) is False
+        assert "Failed to send operator alert" in caplog.text
+        assert "peer not found" in caplog.text
+        assert "boom" in caplog.text  # the alert we could not deliver is still logged
+
+    def test_bot_start_failure_is_swallowed(self):
+        factory = MagicMock()
+        factory.start = AsyncMock(side_effect=RuntimeError("bad token"))
+        with patch('digest.ALERT_CHAT_ID', '123'), patch('digest.BOT_TOKEN', 'tok'), \
+             patch('digest.TelegramClient', return_value=factory):
+            assert asyncio.run(send_alert("boom")) is False
+
+    def test_disconnect_failure_is_swallowed(self):
+        factory, bot = _bot_factory()
+        bot.disconnect = AsyncMock(side_effect=RuntimeError("already closed"))
+        with patch('digest.ALERT_CHAT_ID', '123'), patch('digest.BOT_TOKEN', 'tok'), \
+             patch('digest.TelegramClient', return_value=factory):
+            assert asyncio.run(send_alert("boom")) is True
+
+
+# ---------------------------------------------------------------------------
+# main() alerting (mocks TelegramClient + Anthropic at the network boundary)
+# ---------------------------------------------------------------------------
+
+class TestMainPipelineAlerts:
+    """Alerting behaviour of the full pipeline.
+
+    Reuses TestMainPipeline's mock setup without re-running its tests. All runs
+    use --dry-run, so the only send_message call that can happen is an alert.
+    """
+
+    IN_WINDOW  = TestMainPipeline.IN_WINDOW
+    _DATE_ARGS = TestMainPipeline._DATE_ARGS
+    _setup     = TestMainPipeline._setup
+
+    def _run(self, argv_extra, mock_tg, mock_ac, alert_chat_id='999'):
+        with patch('digest.TelegramClient', return_value=mock_tg), \
+             patch('digest.anthropic.AsyncAnthropic', return_value=mock_ac), \
+             patch('digest.ALERT_CHAT_ID', alert_chat_id), \
+             patch('digest.BOT_TOKEN', None), \
+             patch('sys.argv', ['digest.py', '--dry-run'] + argv_extra + self._DATE_ARGS):
+            asyncio.run(main())
+
+    @staticmethod
+    def _link(msg_id):
+        # CHANNEL_USERNAMES is 'testchannel' (see conftest.py).
+        return f"https://t.me/testchannel/{msg_id}"
+
+    def _big_news(self, msg_ids):
+        return [{"headline": "כותרת", "summary": "סיכום",
+                 "links": [self._link(i) for i in msg_ids],
+                 "section": "conflict", "source": "@testchannel", "time": "10:00"}]
+
+    # -- feature off ------------------------------------------------------
+    def test_no_alert_attempted_when_alert_chat_id_unset(self, tmp_path):
+        msgs = [_tg_msg(i, text="חדשות", dt=self.IN_WINDOW) for i in (100, 101, 102)]
+        mock_tg, mock_ac = self._setup(msgs, big_news=self._big_news([100]))  # 33% coverage
+        self._run(['--output', str(tmp_path / "out.html")], mock_tg, mock_ac,
+                  alert_chat_id=None)
+        mock_tg.send_message.assert_not_called()
+        assert (tmp_path / "out.html").exists()
+
+    def test_no_alert_when_run_fails_and_feature_is_off(self, tmp_path):
+        mock_tg, mock_ac = self._setup([_tg_msg(100, text="x", dt=self.IN_WINDOW)])
+        mock_ac.messages.stream = MagicMock(side_effect=RuntimeError("credit balance too low"))
+        with pytest.raises(RuntimeError):
+            self._run(['--output', str(tmp_path / "out.html")], mock_tg, mock_ac,
+                      alert_chat_id=None)
+        mock_tg.send_message.assert_not_called()
+
+    # -- failure triggers -------------------------------------------------
+    def test_exception_during_run_alerts_and_reraises(self, tmp_path):
+        mock_tg, mock_ac = self._setup([_tg_msg(100, text="x", dt=self.IN_WINDOW)])
+        mock_ac.messages.stream = MagicMock(
+            side_effect=RuntimeError("Your credit balance is too low"))
+
+        with pytest.raises(RuntimeError):
+            self._run(['--output', str(tmp_path / "out.html")], mock_tg, mock_ac)
+
+        mock_tg.send_message.assert_called_once()
+        text = mock_tg.send_message.call_args[0][1]
+        assert "FAILED" in text
+        assert "RuntimeError" in text
+        assert "Your credit balance is too low" in text
+        assert "2026-05-13 11:00" in text  # window, in Israel local time
+        assert not (tmp_path / "out.html").exists()
+
+    def test_create_digest_returning_none_alerts(self, tmp_path):
+        mock_tg, mock_ac = self._setup([_tg_msg(100, text="x", dt=self.IN_WINDOW)])
+        truncated = Mock()
+        truncated.stop_reason = "max_tokens"
+        truncated.usage = Mock(output_tokens=64000)
+        truncated.content = []
+        mock_ac.messages.stream.return_value.__aenter__.return_value.get_final_message = \
+            AsyncMock(return_value=truncated)
+
+        self._run(['--output', str(tmp_path / "out.html")], mock_tg, mock_ac)
+
+        mock_tg.send_message.assert_called_once()
+        text = mock_tg.send_message.call_args[0][1]
+        assert "FAILED" in text and "max_tokens" in text
+        assert not (tmp_path / "out.html").exists()
+
+    def test_no_messages_fetched_alerts(self, tmp_path):
+        mock_tg, mock_ac = self._setup([])
+        self._run(['--output', str(tmp_path / "out.html")], mock_tg, mock_ac)
+        mock_tg.send_message.assert_called_once()
+        text = mock_tg.send_message.call_args[0][1]
+        assert "No digest published" in text
+        assert "2026-05-13 11:00" in text
+
+    # -- coverage triggers ------------------------------------------------
+    def test_coverage_below_threshold_alerts(self, tmp_path):
+        msgs = [_tg_msg(i, text="חדשות", dt=self.IN_WINDOW) for i in (100, 101, 102)]
+        mock_tg, mock_ac = self._setup(msgs, big_news=self._big_news([100]))  # 33%
+        output = str(tmp_path / "out.html")
+
+        with patch('digest.COVERAGE_ALERT_THRESHOLD', 60.0):
+            self._run(['--output', output], mock_tg, mock_ac)
+
+        mock_tg.send_message.assert_called_once()
+        text = mock_tg.send_message.call_args[0][1]
+        assert "1/3" in text and "33%" in text
+        assert output in text  # page path is included
+        assert (tmp_path / "out.html").exists()  # the digest still published
+
+    def test_coverage_above_threshold_does_not_alert(self, tmp_path):
+        msgs = [_tg_msg(i, text="חדשות", dt=self.IN_WINDOW) for i in (100, 101, 102)]
+        mock_tg, mock_ac = self._setup(msgs, big_news=self._big_news([100, 101, 102]))
+        with patch('digest.COVERAGE_ALERT_THRESHOLD', 60.0):
+            self._run(['--output', str(tmp_path / "out.html")], mock_tg, mock_ac)
+        mock_tg.send_message.assert_not_called()
+
+    def test_empty_big_news_alerts_even_with_full_coverage(self, tmp_path):
+        msgs = [_tg_msg(i, text="חדשות", dt=self.IN_WINDOW) for i in (100, 101, 102)]
+        mock_tg, mock_ac = self._setup(msgs, big_news=[])
+        resp = _anthropic_stub(
+            big_news=[],
+            minor_news=[{"headline": "m", "section": "world",
+                         "links": [self._link(i) for i in (100, 101, 102)]}],
+        )
+        mock_ac.messages.stream.return_value.__aenter__.return_value.get_final_message = \
+            AsyncMock(return_value=resp)
+
+        with patch('digest.COVERAGE_ALERT_THRESHOLD', 60.0):
+            self._run(['--output', str(tmp_path / "out.html")], mock_tg, mock_ac)
+
+        mock_tg.send_message.assert_called_once()
+        assert "no big_news" in mock_tg.send_message.call_args[0][1]
+
+    def test_unparseable_big_news_string_alerts(self, tmp_path):
+        """The 2026-08-28 shape: model returns big_news as an unparseable string."""
+        msgs = [_tg_msg(i, text="חדשות", dt=self.IN_WINDOW) for i in (100, 101, 102)]
+        mock_tg, mock_ac = self._setup(msgs)
+        block = Mock()
+        block.type = "tool_use"
+        block.input = {"date_range": "r", "big_news": "[{headline: broken", "minor_news": []}
+        resp = Mock(content=[block], stop_reason="tool_use", usage=Mock(output_tokens=10))
+        mock_ac.messages.stream.return_value.__aenter__.return_value.get_final_message = \
+            AsyncMock(return_value=resp)
+
+        self._run(['--output', str(tmp_path / "out.html")], mock_tg, mock_ac)
+
+        mock_tg.send_message.assert_called_once()
+        text = mock_tg.send_message.call_args[0][1]
+        assert "no big_news" in text and "3 source messages" in text
+
+    # -- robustness -------------------------------------------------------
+    def test_alert_send_failure_does_not_break_a_published_run(self, tmp_path, caplog):
+        msgs = [_tg_msg(i, text="חדשות", dt=self.IN_WINDOW) for i in (100, 101, 102)]
+        mock_tg, mock_ac = self._setup(msgs, big_news=self._big_news([100]))
+        mock_tg.send_message = AsyncMock(side_effect=RuntimeError("chat not found"))
+
+        with caplog.at_level('ERROR'):
+            self._run(['--output', str(tmp_path / "out.html")], mock_tg, mock_ac)
+
+        assert "Failed to send operator alert" in caplog.text
+        assert (tmp_path / "out.html").exists()  # digest still published
+
+    def test_alert_send_failure_does_not_mask_original_error(self, tmp_path, caplog):
+        mock_tg, mock_ac = self._setup([_tg_msg(100, text="x", dt=self.IN_WINDOW)])
+        mock_ac.messages.stream = MagicMock(side_effect=RuntimeError("original failure"))
+        mock_tg.send_message = AsyncMock(side_effect=RuntimeError("chat not found"))
+
+        with caplog.at_level('ERROR'):
+            with pytest.raises(RuntimeError, match="original failure"):
+                self._run(['--output', str(tmp_path / "out.html")], mock_tg, mock_ac)
+
+        assert "Failed to send operator alert" in caplog.text
