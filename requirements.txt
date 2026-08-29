@@ -2,5 +2,6 @@ aiohttp
 telethon
 pytz
 anthropic
+httpx
 telegraph
 pytest
