@@ -1,6 +1,8 @@
-aiohttp
-telethon
-pytz
-anthropic
-telegraph
-pytest
+# Pinned exactly: an unpinned `anthropic` major bump (0.x -> 1.x) silently broke
+# production, because 1.x depends on httpx2 rather than httpx. Bump deliberately.
+anthropic==1.2.0
+Telethon==1.44.0
+pytz==2026.3.post1
+
+# Test-only, but CI installs this file directly.
+pytest==9.1.1
