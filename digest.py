@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any
 
 import anthropic
-import httpx
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from pytz import UTC, timezone
@@ -174,12 +173,26 @@ Rules:
 DIGEST_TOOL: dict[str, Any] = {
     "name": "publish_digest",
     "description": "Output the structured Hebrew daily news update",
+    # Grammar-constrained decoding: the API compiles input_schema into a grammar
+    # and constrains token sampling to schema-valid output. This makes it
+    # structurally impossible for big_news/minor_news to arrive as a JSON string
+    # instead of an array — the failure that silently gutted the digests on
+    # 2026-08-28 and 2026-09-11. Requires additionalProperties: false on every
+    # object below; see test_strict_schema_compliance.
+    "strict": True,
     "input_schema": {
         "type": "object",
         "properties": {
-            "date_range": {"type": "string"},
+            "date_range": {
+                "type": "string",
+                "description": "The digest window, e.g. '2026-08-28 07:00 - 2026-08-28 19:00 Israel'",
+            },
             "big_news": {
                 "type": "array",
+                "description": (
+                    "Significant stories: headline plus a 2-3 sentence Hebrew summary. "
+                    "At most 3 per section."
+                ),
                 "items": {
                     "type": "object",
                     "properties": {
@@ -191,10 +204,14 @@ DIGEST_TOOL: dict[str, Any] = {
                         "time": {"type": "string"},
                     },
                     "required": ["headline", "summary", "links", "section", "source", "time"],
+                    "additionalProperties": False,
                 },
             },
             "minor_news": {
                 "type": "array",
+                "description": (
+                    "Every remaining input message, headline only. No message may be omitted."
+                ),
                 "items": {
                     "type": "object",
                     "properties": {
@@ -205,10 +222,12 @@ DIGEST_TOOL: dict[str, Any] = {
                         "time": {"type": "string"},
                     },
                     "required": ["headline", "links", "section", "source", "time"],
+                    "additionalProperties": False,
                 },
             },
         },
         "required": ["date_range", "big_news", "minor_news"],
+        "additionalProperties": False,
     },
     "cache_control": {"type": "ephemeral"},
 }
@@ -232,7 +251,7 @@ async def create_digest(
 
     anthropic_client = anthropic.AsyncAnthropic(
         api_key=CLAUDE_API_KEY,
-        timeout=httpx.Timeout(300.0, connect=10.0),
+        timeout=anthropic.Timeout(300.0, connect=10.0),
     )
     async with anthropic_client.messages.stream(
         model="claude-sonnet-4-6",
