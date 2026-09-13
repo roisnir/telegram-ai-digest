@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any
 
 import anthropic
-import httpx
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from pytz import UTC, timezone
@@ -252,7 +251,7 @@ async def create_digest(
 
     anthropic_client = anthropic.AsyncAnthropic(
         api_key=CLAUDE_API_KEY,
-        timeout=httpx.Timeout(300.0, connect=10.0),
+        timeout=anthropic.Timeout(300.0, connect=10.0),
     )
     async with anthropic_client.messages.stream(
         model="claude-sonnet-4-6",
