@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<title>מוקאפ — סימון ויזואלי לפתיחת מקור</title>
+<style>
+* { box-sizing: border-box; }
+body { font-family: 'Noto Sans Hebrew', Arial, 'Helvetica Neue', sans-serif; direction: rtl;
+       margin: 0; padding: 0; background: #f5f5f5; color: #222; line-height: 1.6; }
+header { background: #1a1a2e; color: white; padding: 1rem 2rem; }
+header h1 { margin: 0; font-size: 1.5rem; }
+.date-range { margin: .25rem 0 0; opacity: .8; font-size: .9rem; }
+.wrap { max-width: 900px; margin: 0 auto; padding: 1rem 1.5rem; display: grid;
+        grid-template-columns: 1fr 1fr; gap: 1.25rem; }
+.pane { min-width: 0; }
+.pane h2 { font-size: 1.05rem; border-bottom: 2px solid #1a1a2e; padding-bottom: .4rem; margin: 0 0 .75rem; }
+.pane.before h2 { border-color: #b00020; color: #b00020; }
+.pane.after  h2 { border-color: #0E8A16; color: #0E8A16; }
+.note { font-size: .8rem; color: #666; margin: 0 0 .75rem; min-height: 2.6em; }
+
+article { background: #fff; border-radius: 8px; padding: 1rem 1.25rem; margin-bottom: 1rem;
+          box-shadow: 0 1px 3px rgba(0,0,0,.1); }
+article h4 { margin: 0 0 .3rem; font-size: 1.05rem; }
+.meta { color: #666; font-size: .85rem; margin: 0 0 .5rem; }
+details { margin-top: .5rem; }
+summary { cursor: pointer; color: #555; font-size: .85rem; padding: .2rem .5rem;
+          background: #f0f0f0; border-radius: 4px; display: inline-block; }
+ul.minor-news { list-style: none; padding: 0; margin: 0; }
+ul.minor-news li { margin-bottom: .4rem; padding: .5rem .75rem; background: #fff; border-radius: 6px; }
+
+/* --- TODAY: minor-news headline looks like plain body text --- */
+.before ul.minor-news li > details > summary { cursor: pointer; font-size: .95rem; color: #222;
+          background: none; padding: 0; display: block; }
+
+/* --- PROPOSED: headline reads as openable --- */
+.after ul.minor-news li > details > summary { cursor: pointer; font-size: .95rem; color: #222;
+          background: none; padding: 0; display: flex; gap: .45rem; align-items: baseline; }
+.after ul.minor-news li > details > summary::marker,
+.after ul.minor-news li > details > summary::-webkit-details-marker { display: none; content: ''; }
+.after ul.minor-news li > details > summary::before {
+  content: '⌄'; color: #1a1a2e; font-size: 1.1rem; line-height: 1; opacity: .75;
+  transition: transform .15s ease; flex: 0 0 auto; }
+.after ul.minor-news li > details[open] > summary::before { transform: rotate(180deg); }
+.after ul.minor-news li > details > summary:hover { color: #1a1a2e; }
+.after ul.minor-news li:hover { background: #fafaff; box-shadow: 0 1px 3px rgba(26,26,46,.12); }
+.after ul.minor-news li > details > summary .hint { color: #777; font-size: .75rem; white-space: nowrap; }
+
+.tg-embed { margin-top: .5rem; border: 1px dashed #c9c9d6; border-radius: 6px; padding: .6rem .75rem;
+            color: #888; font-size: .8rem; background: #fbfbfd; }
+.cursor { font-size: .75rem; color: #999; }
+</style>
+</head>
+<body>
+<header>
+  <h1>דיג'סט יומי</h1>
+  <p class="date-range">מוקאפ — סימון ויזואלי לפתיחת מקור (issue #23)</p>
+</header>
+
+<div class="wrap">
+  <div class="pane before">
+    <h2>היום</h2>
+    <p class="note">הכותרת של חדשה קטנה נראית כמו טקסט רגיל. שום דבר לא מרמז שאפשר ללחוץ עליה ולפתוח את הודעת המקור.</p>
+
+    <ul class="minor-news">
+      <li><details><summary>חיסול נוסף בעזה: הרוג ומספר פצועים בתקיפת אוהל</summary>
+        <div class="tg-embed">הודעת מקור מטלגרם</div></details></li>
+      <li><details><summary>דיווח: מגעים מתקדמים על עסקה חדשה</summary>
+        <div class="tg-embed">הודעת מקור מטלגרם</div></details></li>
+      <li><details open><summary>שר האוצר: תקציב 2027 יוגש בתוך שבועיים</summary>
+        <div class="tg-embed">הודעת מקור מטלגרם</div></details></li>
+    </ul>
+
+    <article>
+      <h4>ידיעה מרכזית לדוגמה</h4>
+      <p class="meta">סיכום קצר של הידיעה המרכזית בשתיים-שלוש שורות.</p>
+      <details><summary>מקורות (3)</summary></details>
+    </article>
+  </div>
+
+  <div class="pane after">
+    <h2>מוצע</h2>
+    <p class="note">חץ קטן לפני כל כותרת מסמן שהיא נפתחת, מסתובב כשהיא פתוחה, והשורה מוארת במעבר עכבר. הכיתוב והסדר לא משתנים.</p>
+
+    <ul class="minor-news">
+      <li><details><summary><span>חיסול נוסף בעזה: הרוג ומספר פצועים בתקיפת אוהל</span><span class="hint">מקור</span></summary>
+        <div class="tg-embed">הודעת מקור מטלגרם</div></details></li>
+      <li><details><summary><span>דיווח: מגעים מתקדמים על עסקה חדשה</span><span class="hint">מקור</span></summary>
+        <div class="tg-embed">הודעת מקור מטלגרם</div></details></li>
+      <li><details open><summary><span>שר האוצר: תקציב 2027 יוגש בתוך שבועיים</span><span class="hint">מקור</span></summary>
+        <div class="tg-embed">הודעת מקור מטלגרם</div></details></li>
+    </ul>
+
+    <article>
+      <h4>ידיעה מרכזית לדוגמה</h4>
+      <p class="meta">סיכום קצר של הידיעה המרכזית בשתיים-שלוש שורות.</p>
+      <details><summary>מקורות (3)</summary></details>
+      <p class="cursor">הכפתור האפור של "מקורות" נשאר כפי שהוא — הוא כבר נראה לחיץ.</p>
+    </article>
+  </div>
+</div>
+</body>
+</html>
