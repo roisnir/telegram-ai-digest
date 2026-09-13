@@ -34,3 +34,11 @@ Explicitly NOT a Further Reading Link: a Comment Link (below).
 
 ### Comment Link
 A self-referential URL that some channels append to every message, pointing back to the same post on the channel's own web mirror — usually its comments section (e.g. `abualiexpress.com/heb<id>#comments`, or the bare `abualiexpress.com/heb<id>` mirror permalink). It is the same content as the Telegram message, not an external source, so it must be excluded from Further Reading Links. Detection is by the channel's mirror-permalink pattern (host + `/heb<id>` path), not by the `#comments` fragment — matching on `#comments` alone is too fuzzy (a real external article could carry that anchor too).
+
+### Ad Message (הודעה שיווקית)
+A Source Message that is sponsored content rather than news — the source channels sell post slots, and those posts are not wanted in the digest. Detected in two steps: a message opening with the channel's sponsorship disclosure (`°תוכן שיווקי`, `°תוכן פוליטי במימון…` — the pattern list lives in `_AD_MARKER_PATTERNS`), plus the single message posted immediately after it, because the disclosure marker and the ad body are usually two consecutive messages. Detection never chains past that one message.
+
+An Ad Message is expected to be uncovered, so the Coverage Check counts it apart from a real story the model dropped. Detection is deliberately narrow: an ad shown as a missing story is a harmless false alarm, while a real story hidden as an ad is a silent loss.
+
+### Coverage Check (בדיקת כיסוי)
+The diagnostics block at the foot of every page. Reports the raw figure (all Source Messages covered / total, kept so older pages stay comparable) alongside the adjusted content figure that excludes Ad Messages, lists the two groups of uncovered messages separately, and warns in red when real content went uncovered.

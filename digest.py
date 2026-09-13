@@ -331,6 +331,8 @@ ul.minor-news li > details > summary { cursor: pointer; font-size: 0.95rem; colo
 .diagnostics li { padding: 0.15rem 0; }
 .diagnostics a { color: #777; }
 .diagnostics-warning { color: #b00020; font-weight: 600; background: #fff3f3; padding: 0.5rem 0.75rem; border-radius: 6px; margin: 0 0 0.6rem; }
+.diagnostics details.uncovered-real > summary { color: #b00020; background: #fff3f3; font-weight: 600; }
+.diagnostics details.uncovered-ads > summary { color: #999; background: #f4f4f4; }
 """.strip()
 
 
@@ -470,14 +472,83 @@ def _digest_referenced_links(digest: dict[str, Any]) -> set[str]:
     return referenced
 
 
+# Sponsored-content disclosure markers used by the source channels (see CONTEXT.md,
+# "Ad Message"). Derived from the published archive in /opt/nginx/digest: across all
+# historical pages every occurrence of the degree-sign sigil "°תוכן…" sat in the
+# uncovered list, and none ever appeared in a real story — @abualiexpress prefixes
+# its paid posts with it ("°תוכן שיווקי", "°תוכן פוליטי במימון…").
+# Tune this list rather than the code below. Keep it narrow: wrongly hiding a real
+# story as an ad is far worse than showing an ad as missing.
+_AD_MARKER_PATTERNS: list[str] = [
+    r'°\s*תוכן',            # channel disclosure sigil, any "°תוכן …" variant
+    r'תוכן\s+שיווקי',
+    r'תוכן\s+ממומן',
+    r'תוכן\s+פרסומי',
+    r'פוסט\s+ממומן',
+    r'הודעה\s+פרסומית',
+    r'#\s*פרסומת',
+    r'הפרסום\s+בטלגרם',     # channel selling its own ad slots
+    r'לפרסום\s+בערוץ',
+]
+
+_AD_MARKER_RE = re.compile("|".join(_AD_MARKER_PATTERNS))
+
+# A disclosure only counts as such when it opens the message: "בחסות"-style wording
+# deep inside a news item is not a sponsorship notice.
+_AD_MARKER_HEAD_CHARS = 120
+
+
+def _is_ad_marker(text: str | None) -> bool:
+    """True when a Source Message opens with a sponsored-content disclosure."""
+    head = (text or "").replace("*", "").replace("_", "").strip()[:_AD_MARKER_HEAD_CHARS]
+    return bool(head) and bool(_AD_MARKER_RE.search(head))
+
+
+def classify_ad_messages(source_map: dict) -> set[str]:
+    """Return the links of Source Messages that are Ad Messages (see CONTEXT.md).
+
+    Two deliberately conservative rules:
+
+    1. the message opens with a sponsorship disclosure marker
+       (``_AD_MARKER_PATTERNS``); or
+    2. it is the message posted immediately after such a marker in the same
+       channel — the channels usually post the marker and the ad body as two
+       consecutive messages, so a marker-only match under-counts by ~half.
+
+    Rule 2 never chains: only the single message right after a marker is taken,
+    so a real story two posts later is never swallowed. Ordering is by ``ts``
+    within each channel, so it behaves the same for fixtures and live data.
+    """
+    ads: set[str] = set()
+    by_channel: dict[str, list[str]] = {}
+    for link in source_map:
+        by_channel.setdefault(_channel_of_link(link), []).append(link)
+    for links in by_channel.values():
+        ordered = sorted(links, key=lambda l: source_map.get(l, {}).get("ts", float('inf')))
+        after_marker = False
+        for link in ordered:
+            is_marker = _is_ad_marker(source_map.get(link, {}).get("text"))
+            if is_marker or after_marker:
+                ads.add(link)
+            after_marker = is_marker
+    return ads
+
+
 def compute_coverage(digest: dict[str, Any], source_map: dict) -> dict[str, Any]:
     """Verify every source message appears in at least one story.
 
     Returns overall and per-channel covered/total counts plus the ordered list
-    of uncovered source links. Computed from ``source_map`` keys and the digest
-    dict only, so it works the same with fixtures and live data.
+    of uncovered source links, split into Ad Messages (correctly skipped) and
+    real ones (genuinely dropped stories). Computed from ``source_map`` keys and
+    the digest dict only, so it works the same with fixtures and live data.
+
+    Keys: ``covered``/``total`` are the raw figures, unchanged, so pages stay
+    comparable over time. ``real_covered``/``real_total`` exclude Ad Messages
+    and are the actionable number; ``uncovered_ads``/``uncovered_real`` split
+    ``uncovered`` (which still holds every uncovered link, in order).
     """
     referenced = _digest_referenced_links(digest)
+    ad_links = classify_ad_messages(source_map)
     source_links = list(source_map.keys())
 
     per_channel: dict[str, dict[str, int]] = {}
@@ -495,11 +566,17 @@ def compute_coverage(digest: dict[str, Any], source_map: dict) -> dict[str, Any]
     ordered_channels = dict(
         sorted(per_channel.items(), key=lambda kv: (-kv[1]["total"], kv[0]))
     )
+    real_links = [link for link in source_links if link not in ad_links]
     return {
         "covered": sum(b["covered"] for b in per_channel.values()),
         "total": len(source_links),
         "per_channel": ordered_channels,
         "uncovered": uncovered,
+        "uncovered_ads": [link for link in uncovered if link in ad_links],
+        "uncovered_real": [link for link in uncovered if link not in ad_links],
+        "ads": len(ad_links),
+        "real_covered": sum(1 for link in real_links if link in referenced),
+        "real_total": len(real_links),
     }
 
 
@@ -545,9 +622,9 @@ def _coverage_html(digest: dict[str, Any], source_map: dict) -> str:
         for ch, b in cov["per_channel"].items()
     )
 
-    if cov["uncovered"]:
+    def _uncovered_details(links: list[str], summary: str, css_class: str, open_by_default: bool) -> str:
         rows = ""
-        for link in cov["uncovered"]:
+        for link in links:
             info = source_map.get(link, {})
             time = info.get("time", "")
             snippet = (info.get("text") or "").strip().replace("\n", " ")
@@ -556,20 +633,57 @@ def _coverage_html(digest: dict[str, Any], source_map: dict) -> str:
             label_parts = [p for p in (_esc(time), _esc(snippet)) if p]
             label = " — ".join(label_parts) if label_parts else _esc(link)
             rows += f'<li><a href="{_esc(link)}">{label}</a></li>\n'
-        uncovered_html = (
-            f'<details>\n'
-            f'<summary>{len(cov["uncovered"])} הודעות שלא סוקרו</summary>\n'
+        attrs = f' class="{css_class}"' + (" open" if open_by_default else "")
+        return (
+            f'<details{attrs}>\n'
+            f'<summary>{summary}</summary>\n'
             f'<ul>\n{rows}</ul>\n'
             f'</details>\n'
         )
+
+    real_uncovered = cov["uncovered_real"]
+    ad_uncovered = cov["uncovered_ads"]
+
+    if real_uncovered:
+        warning_html += (
+            f'<p class="diagnostics-warning">⚠️ {len(real_uncovered)} הודעות תוכן לא סוקרו בעדכון — '
+            f'ייתכן שידיעות אמיתיות נשמטו.</p>\n'
+        )
+
+    uncovered_html = ""
+    if real_uncovered:
+        uncovered_html += _uncovered_details(
+            real_uncovered,
+            f'{len(real_uncovered)} הודעות תוכן שלא סוקרו',
+            "uncovered-real",
+            True,
+        )
+    elif not ad_uncovered:
+        uncovered_html += '<p>כל ההודעות סוקרו בעדכון. ✓</p>\n'
     else:
-        uncovered_html = '<p>כל ההודעות סוקרו בעדכון. ✓</p>\n'
+        uncovered_html += '<p>כל הודעות התוכן סוקרו בעדכון. ✓</p>\n'
+
+    if ad_uncovered:
+        uncovered_html += _uncovered_details(
+            ad_uncovered,
+            f'{len(ad_uncovered)} הודעות שיווקיות שדולגו (כצפוי)',
+            "uncovered-ads",
+            False,
+        )
+
+    real_line = ""
+    if cov["ads"] and cov["real_total"]:
+        real_line = (
+            f'<p class="meta">כיסוי תוכן: סוקרו {cov["real_covered"]} מתוך {cov["real_total"]} '
+            f'הודעות, ללא {cov["ads"]} הודעות שיווקיות.</p>\n'
+        )
 
     return (
         f'<section class="diagnostics">\n'
         f'<h2>בדיקת כיסוי</h2>\n'
         f'{warning_html}'
         f'<p class="meta">סוקרו {cov["covered"]} מתוך {cov["total"]} הודעות.</p>\n'
+        f'{real_line}'
         f'<ul class="coverage-per-channel">\n{per_channel_items}</ul>\n'
         f'{uncovered_html}'
         f'</section>\n'
