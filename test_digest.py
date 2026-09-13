@@ -19,6 +19,7 @@ from digest import (
     fetch_messages,
     create_digest,
     main,
+    DIGEST_TOOL,
     LOCAL_TZ,
 )
 
@@ -118,6 +119,90 @@ class TestNormalizeDigest:
 # ---------------------------------------------------------------------------
 # time_of_day_label
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Strict tool use: the schema must stay inside the grammar-constrained subset
+# ---------------------------------------------------------------------------
+
+class TestDigestToolStrictSchema:
+    """Guards the `strict: True` contract on DIGEST_TOOL.
+
+    Strict tool use compiles input_schema into a sampling grammar, which is what
+    makes a stringified `big_news` structurally impossible (the 2026-08-28 and
+    2026-09-11 incidents). The API rejects a schema outside the supported
+    subset, so a well-meaning schema edit would break every run at request time
+    rather than in review. These tests fail instead.
+    """
+
+    # Keywords the strict subset does not accept.
+    UNSUPPORTED = {
+        "maxItems", "minLength", "maxLength", "pattern", "format", "oneOf",
+        "allOf", "anyOf", "not", "$ref", "$defs", "multipleOf", "minimum",
+        "maximum", "exclusiveMinimum", "exclusiveMaximum", "uniqueItems",
+        "patternProperties", "propertyNames", "const", "if", "then", "else",
+    }
+
+    @staticmethod
+    def _objects(node, path="root"):
+        """Yield (path, node) for every object-typed node in the schema."""
+        if isinstance(node, dict):
+            if node.get("type") == "object":
+                yield path, node
+            for key, value in node.get("properties", {}).items():
+                yield from TestDigestToolStrictSchema._objects(value, f"{path}.{key}")
+            if "items" in node:
+                yield from TestDigestToolStrictSchema._objects(node["items"], f"{path}[]")
+
+    @staticmethod
+    def _keywords(node):
+        seen = set()
+        if isinstance(node, dict):
+            seen |= set(node.keys())
+            for value in node.values():
+                seen |= TestDigestToolStrictSchema._keywords(value)
+        elif isinstance(node, list):
+            for value in node:
+                seen |= TestDigestToolStrictSchema._keywords(value)
+        return seen
+
+    def test_strict_flag_is_set(self):
+        assert DIGEST_TOOL.get("strict") is True
+
+    def test_every_object_forbids_additional_properties(self):
+        objects = dict(self._objects(DIGEST_TOOL["input_schema"]))
+        assert objects, "expected at least the root object"
+        offenders = [p for p, n in objects.items() if n.get("additionalProperties") is not False]
+        assert not offenders, f"additionalProperties must be False on: {offenders}"
+
+    def test_root_and_both_item_objects_are_covered(self):
+        assert set(dict(self._objects(DIGEST_TOOL["input_schema"]))) == {
+            "root", "root.big_news[]", "root.minor_news[]",
+        }
+
+    def test_every_object_property_is_required(self):
+        """Optional properties are capped at 24 across all strict schemas; we use none."""
+        for path, node in self._objects(DIGEST_TOOL["input_schema"]):
+            assert set(node.get("required", [])) == set(node.get("properties", {})), path
+
+    def test_no_unsupported_json_schema_keywords(self):
+        used = self._keywords(DIGEST_TOOL["input_schema"])
+        assert not (used & self.UNSUPPORTED), f"unsupported in strict mode: {sorted(used & self.UNSUPPORTED)}"
+
+    def test_min_items_only_uses_supported_values(self):
+        """The strict subset allows minItems of 0 or 1 only."""
+
+        def walk(node):
+            if isinstance(node, dict):
+                if "minItems" in node:
+                    assert node["minItems"] in (0, 1), node["minItems"]
+                for value in node.values():
+                    walk(value)
+            elif isinstance(node, list):
+                for value in node:
+                    walk(value)
+
+        walk(DIGEST_TOOL["input_schema"])
+
 
 class TestTimeOfDayLabel:
     @pytest.mark.parametrize("hour", [0, 6, 7, 12])
