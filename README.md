@@ -37,6 +37,7 @@ CLAUDE_API_KEY=<your_claude_api_key>
 BOT_TOKEN=<optional_bot_token>          # if set, the digest message is sent by this bot (must be admin of TARGET_CHANNEL); otherwise sent by the user account
 HTML_OUTPUT_DIR=/var/www/digest          # local path where HTML files are written
 PUBLIC_BASE_URL=https://digest.example.com  # public URL prefix (no trailing slash)
+ALERT_CHAT_ID=me                         # optional; operator alerts (see below). Unset = alerts disabled
 ```
 
 ### 3. Authenticate Telegram (first run only)
@@ -202,6 +203,73 @@ The script will:
 2. Classify and summarize them into a Hebrew digest using Claude AI.
 3. Write an HTML digest file to `HTML_OUTPUT_DIR`.
 4. Send the public URL to the target Telegram channel (skipped with `--dry-run`).
+
+## Operator Alerts
+
+The script runs unattended from cron, so a failed or degraded run is otherwise
+invisible until somebody notices that no digest arrived — or reads the coverage
+diagnostics at the bottom of the page. Setting `ALERT_CHAT_ID` turns on an
+out-of-band Telegram alert to the operator's *private* chat.
+
+**The feature is off by default.** If `ALERT_CHAT_ID` is unset, nothing is sent
+and behaviour is identical to before.
+
+### Configuration
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `ALERT_CHAT_ID` | *(unset — feature off)* | Where alerts go. A numeric Telegram user id (`123456789`), an `@username`, or the literal `me` (the sending account's own Saved Messages). |
+
+Numeric values are passed to Telethon as integers and anything else as a string,
+the same coercion `TARGET_CHANNEL` uses.
+
+### ⚠️ A bot cannot start a conversation with you
+
+If `BOT_TOKEN` is set, alerts are sent **by the bot**, matching how the digest
+message itself is sent. Telegram does not let a bot open a chat with a user:
+the bot can only message you once **you have messaged it first** (press *Start*
+in the bot's chat). If you skip that, the alert send fails, the failure is
+logged, and the alert never reaches you — a particularly unhelpful outcome for
+a feature whose whole job is telling you when things break.
+
+Three ways to get this right:
+
+1. **Message the bot once**, then set `ALERT_CHAT_ID` to your numeric user id.
+2. Leave `BOT_TOKEN` unset so alerts go over the **user session**, which can
+   message anyone (including `me`).
+3. Set `ALERT_CHAT_ID=me` — Saved Messages on the sending account. With
+   `BOT_TOKEN` set this is the *bot's* own Saved Messages, which you cannot
+   read, so `me` is only useful together with the user session.
+
+Verify your setup with `python digest.py --dry-run`: alerts fire in dry-run
+mode too, so a misconfiguration shows up before a real incident does.
+
+### What triggers an alert
+
+**Run failed — nothing published:**
+
+- an unhandled exception anywhere in the run (for example
+  `anthropic.BadRequestError: Your credit balance is too low`). The alert
+  carries the exception type, its message, and the time window; the exception
+  is then re-raised so the process still exits non-zero.
+- `create_digest()` returned nothing — output truncated at `max_tokens`, no
+  `tool_use` block came back, or the model's `big_news`/`minor_news` fields
+  couldn't be parsed into a list (`DigestParseError`).
+- no messages fetched from any channel (a quiet window looks the same, but you
+  still got no digest).
+
+**Digest published but looks wrong** — the alert includes the coverage numbers
+and the page URL:
+
+- at least one non-ad source message missing from the digest (Ad Messages are
+  expected to be skipped, so they don't count).
+- zero `big_news` stories despite there being source messages. This is checked
+  independently of coverage, because a model that returns no big stories out of
+  a full inbox is itself a sign something went wrong.
+
+Sending an alert can never break a run: the send is wrapped in `try/except`, a
+failure to deliver is logged (along with the text that could not be delivered),
+and the original error is still raised.
 
 ## Logging
 
