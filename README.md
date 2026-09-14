@@ -38,7 +38,6 @@ BOT_TOKEN=<optional_bot_token>          # if set, the digest message is sent by 
 HTML_OUTPUT_DIR=/var/www/digest          # local path where HTML files are written
 PUBLIC_BASE_URL=https://digest.example.com  # public URL prefix (no trailing slash)
 ALERT_CHAT_ID=me                         # optional; operator alerts (see below). Unset = alerts disabled
-COVERAGE_ALERT_THRESHOLD=60              # optional; % of source messages that must be covered (default 60)
 ```
 
 ### 3. Authenticate Telegram (first run only)
@@ -220,7 +219,6 @@ and behaviour is identical to before.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `ALERT_CHAT_ID` | *(unset — feature off)* | Where alerts go. A numeric Telegram user id (`123456789`), an `@username`, or the literal `me` (the sending account's own Saved Messages). |
-| `COVERAGE_ALERT_THRESHOLD` | `60` | Percentage of source messages that must appear in the digest before the run counts as healthy. |
 
 Numeric values are passed to Telethon as integers and anything else as a string,
 the same coercion `TARGET_CHANNEL` uses.
@@ -262,9 +260,10 @@ mode too, so a misconfiguration shows up before a real incident does.
 **Digest published but looks wrong** — the alert includes the coverage numbers
 and the page URL:
 
-- coverage below `COVERAGE_ALERT_THRESHOLD`.
+- at least one non-ad source message missing from the digest (Ad Messages are
+  expected to be skipped, so they don't count).
 - zero `big_news` stories despite there being source messages. This is checked
-  independently of the percentage, because it is the exact shape of the failure
+  independently of coverage, because it is the exact shape of the failure
   where the model returns `big_news` as an unparseable JSON string and it is
   silently replaced with an empty list.
 

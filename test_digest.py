@@ -1786,51 +1786,60 @@ class TestCheckDigestHealth:
                                            "time": "08:00", "ts": float(i)}
                   for i in range(1, 11)}
 
+    # Same 10-message channel, but message #10 opens with an ad disclosure marker.
+    SOURCE_MAP_WITH_AD = {
+        **{k: v for k, v in SOURCE_MAP.items() if k != "https://t.me/ch/10"},
+        "https://t.me/ch/10": {**SOURCE_MAP["https://t.me/ch/10"], "text": "°תוכן שיווקי מודעה"},
+    }
+
     def _digest(self, covered_ids):
         return {"big_news": [{"headline": "h", "section": "conflict",
                               "links": [f"https://t.me/ch/{i}" for i in covered_ids]}],
                 "minor_news": []}
 
-    def test_healthy_digest_has_no_issues(self):
-        issues, cov = check_digest_health(self._digest(range(1, 10)), self.SOURCE_MAP, threshold=60)
+    def test_full_coverage_has_no_issues(self):
+        issues, cov = check_digest_health(self._digest(range(1, 11)), self.SOURCE_MAP)
         assert issues == []
+        assert (cov["covered"], cov["total"]) == (10, 10)
+
+    def test_one_missing_non_ad_message_flagged(self):
+        issues, cov = check_digest_health(self._digest(range(1, 10)), self.SOURCE_MAP)
+        assert len(issues) == 1
+        assert "1" in issues[0] and "non-ad message" in issues[0]
         assert (cov["covered"], cov["total"]) == (9, 10)
 
-    def test_low_coverage_flagged(self):
-        issues, cov = check_digest_health(self._digest([1, 2, 3]), self.SOURCE_MAP, threshold=60)
+    def test_multiple_missing_non_ad_messages_flagged(self):
+        issues, _ = check_digest_health(self._digest([1, 2, 3]), self.SOURCE_MAP)
         assert len(issues) == 1
-        assert "30%" in issues[0] and "60%" in issues[0]
+        assert "7" in issues[0] and "non-ad message" in issues[0]
 
-    def test_coverage_exactly_at_threshold_is_healthy(self):
-        issues, _ = check_digest_health(self._digest(range(1, 7)), self.SOURCE_MAP, threshold=60)
+    def test_missing_ad_message_not_flagged(self):
+        # Message #10 is an ad and is the only one missing — should stay quiet.
+        issues, cov = check_digest_health(self._digest(range(1, 10)), self.SOURCE_MAP_WITH_AD)
         assert issues == []
+        assert cov["uncovered_ads"] == ["https://t.me/ch/10"]
 
     def test_empty_big_news_flagged_independently(self):
         # 100% coverage from minor_news alone, but no big_news at all.
         digest = {"big_news": [],
                   "minor_news": [{"headline": "m", "section": "world",
                                   "links": list(self.SOURCE_MAP)}]}
-        issues, _ = check_digest_health(digest, self.SOURCE_MAP, threshold=60)
+        issues, _ = check_digest_health(digest, self.SOURCE_MAP)
         assert len(issues) == 1
         assert "no big_news" in issues[0] and "10 source messages" in issues[0]
 
     def test_incident_shape_flags_both(self):
-        # 2026-08-28: 39% coverage and zero big_news.
+        # 2026-08-28: most messages missing and zero big_news.
         digest = {"big_news": [],
                   "minor_news": [{"headline": "m", "section": "world",
                                   "links": [f"https://t.me/ch/{i}" for i in range(1, 4)]}]}
-        issues, _ = check_digest_health(digest, self.SOURCE_MAP, threshold=60)
+        issues, _ = check_digest_health(digest, self.SOURCE_MAP)
         assert len(issues) == 2
 
     def test_empty_source_map_never_alerts(self):
-        issues, cov = check_digest_health({"big_news": [], "minor_news": []}, {}, threshold=60)
+        issues, cov = check_digest_health({"big_news": [], "minor_news": []}, {})
         assert issues == []
         assert cov["total"] == 0
-
-    def test_threshold_defaults_to_module_constant(self):
-        with patch('digest.COVERAGE_ALERT_THRESHOLD', 95.0):
-            issues, _ = check_digest_health(self._digest(range(1, 10)), self.SOURCE_MAP)
-        assert len(issues) == 1
 
 
 class TestAlertFormatting:
@@ -1853,7 +1862,7 @@ class TestAlertFormatting:
 
     def test_health_alert_has_numbers_issues_and_url(self):
         cov = {"covered": 21, "total": 54, "per_channel": {}, "uncovered": []}
-        text = format_health_alert(["coverage 39% is below the 60% threshold"], cov,
+        text = format_health_alert(["33 non-ad messages missing from the digest"], cov,
                                    "2026-08-28 07:00 -> 19:00 Israel",
                                    "https://example.com/d.html")
         assert "21/54" in text and "39%" in text
@@ -2044,25 +2053,30 @@ class TestMainPipelineAlerts:
         assert "2026-05-13 11:00" in text
 
     # -- coverage triggers ------------------------------------------------
-    def test_coverage_below_threshold_alerts(self, tmp_path):
+    def test_missing_non_ad_message_alerts(self, tmp_path):
         msgs = [_tg_msg(i, text="חדשות", dt=self.IN_WINDOW) for i in (100, 101, 102)]
-        mock_tg, mock_ac = self._setup(msgs, big_news=self._big_news([100]))  # 33%
+        mock_tg, mock_ac = self._setup(msgs, big_news=self._big_news([100]))  # 2 of 3 missing
         output = str(tmp_path / "out.html")
 
-        with patch('digest.COVERAGE_ALERT_THRESHOLD', 60.0):
-            self._run(['--output', output], mock_tg, mock_ac)
+        self._run(['--output', output], mock_tg, mock_ac)
 
         mock_tg.send_message.assert_called_once()
         text = mock_tg.send_message.call_args[0][1]
-        assert "1/3" in text and "33%" in text
+        assert "2" in text and "non-ad message" in text
         assert output in text  # page path is included
         assert (tmp_path / "out.html").exists()  # the digest still published
 
-    def test_coverage_above_threshold_does_not_alert(self, tmp_path):
+    def test_full_coverage_does_not_alert(self, tmp_path):
         msgs = [_tg_msg(i, text="חדשות", dt=self.IN_WINDOW) for i in (100, 101, 102)]
         mock_tg, mock_ac = self._setup(msgs, big_news=self._big_news([100, 101, 102]))
-        with patch('digest.COVERAGE_ALERT_THRESHOLD', 60.0):
-            self._run(['--output', str(tmp_path / "out.html")], mock_tg, mock_ac)
+        self._run(['--output', str(tmp_path / "out.html")], mock_tg, mock_ac)
+        mock_tg.send_message.assert_not_called()
+
+    def test_missing_ad_message_does_not_alert(self, tmp_path):
+        msgs = [_tg_msg(i, text="חדשות", dt=self.IN_WINDOW) for i in (100, 101)]
+        msgs.append(_tg_msg(102, text="°תוכן שיווקי מודעה", dt=self.IN_WINDOW))
+        mock_tg, mock_ac = self._setup(msgs, big_news=self._big_news([100, 101]))  # ad (102) uncovered
+        self._run(['--output', str(tmp_path / "out.html")], mock_tg, mock_ac)
         mock_tg.send_message.assert_not_called()
 
     def test_empty_big_news_alerts_even_with_full_coverage(self, tmp_path):
@@ -2076,8 +2090,7 @@ class TestMainPipelineAlerts:
         mock_ac.messages.stream.return_value.__aenter__.return_value.get_final_message = \
             AsyncMock(return_value=resp)
 
-        with patch('digest.COVERAGE_ALERT_THRESHOLD', 60.0):
-            self._run(['--output', str(tmp_path / "out.html")], mock_tg, mock_ac)
+        self._run(['--output', str(tmp_path / "out.html")], mock_tg, mock_ac)
 
         mock_tg.send_message.assert_called_once()
         assert "no big_news" in mock_tg.send_message.call_args[0][1]

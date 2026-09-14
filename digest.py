@@ -60,17 +60,6 @@ except ValueError as e:
     raise
 
 
-def _float_env(var_name: str, default: float) -> float:
-    raw = os.getenv(var_name)
-    if raw is None or not raw.strip():
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        logging.warning(f"Invalid {var_name}={raw!r} — falling back to {default}")
-        return default
-
-
 # Optional operator alerting. Unset ALERT_CHAT_ID => the feature is entirely off.
 # Accepts a numeric Telegram user id, an '@username', or the literal 'me'
 # (the sending account's own Saved Messages).
@@ -79,9 +68,6 @@ def _float_env(var_name: str, default: float) -> float:
 # messaged that bot at least once (or if ALERT_CHAT_ID is a group/channel the
 # bot is in). Otherwise use the user session (leave BOT_TOKEN unset) or 'me'.
 ALERT_CHAT_ID = os.getenv('ALERT_CHAT_ID')
-# Percentage of source messages that must appear in the digest before a run is
-# considered healthy. Real runs land at 80-95%; the 2026-08-28 incident was 39%.
-COVERAGE_ALERT_THRESHOLD = _float_env('COVERAGE_ALERT_THRESHOLD', 60.0)
 
 
 # ---------------------------------------------------------------------------
@@ -952,25 +938,24 @@ def format_window(start_date: datetime | None, end_date: datetime | None) -> str
 def check_digest_health(
     digest: dict[str, Any],
     source_map: dict,
-    threshold: float | None = None,
 ) -> tuple[list[str], dict[str, Any]]:
     """Return (issues, coverage) for a digest that is about to be published.
 
-    ``issues`` is empty for a healthy digest. Two independent signals:
-    poor coverage of the source messages, and an empty ``big_news`` section
-    despite there being source messages at all (the shape of the 2026-08-28
-    incident, where the model returned big_news as an unparseable string and
-    normalize_digest substituted an empty list).
+    ``issues`` is empty for a healthy digest. Two independent signals: at
+    least one non-ad source message missing from the digest (Ad Messages are
+    expected to be skipped, so they don't count), and an empty ``big_news``
+    section despite there being source messages at all (the shape of the
+    2026-08-28 incident, where the model returned big_news as an unparseable
+    string and normalize_digest substituted an empty list).
     """
-    if threshold is None:
-        threshold = COVERAGE_ALERT_THRESHOLD
     cov = compute_coverage(digest, source_map)
     issues: list[str] = []
     total = cov["total"]
     if total:
-        pct = 100.0 * cov["covered"] / total
-        if pct < threshold:
-            issues.append(f"coverage {pct:.0f}% is below the {threshold:.0f}% threshold")
+        missed_real = cov["real_total"] - cov["real_covered"]
+        if missed_real > 0:
+            noun = "message" if missed_real == 1 else "messages"
+            issues.append(f"{missed_real} non-ad {noun} missing from the digest")
         if not digest.get("big_news"):
             issues.append(f"no big_news stories despite {total} source messages")
     return issues, cov
