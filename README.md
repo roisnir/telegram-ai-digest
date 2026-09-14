@@ -252,8 +252,9 @@ mode too, so a misconfiguration shows up before a real incident does.
   `anthropic.BadRequestError: Your credit balance is too low`). The alert
   carries the exception type, its message, and the time window; the exception
   is then re-raised so the process still exits non-zero.
-- `create_digest()` returned nothing — output truncated at `max_tokens`, or no
-  `tool_use` block came back.
+- `create_digest()` returned nothing — output truncated at `max_tokens`, no
+  `tool_use` block came back, or the model's `big_news`/`minor_news` fields
+  couldn't be parsed into a list (`DigestParseError`).
 - no messages fetched from any channel (a quiet window looks the same, but you
   still got no digest).
 
@@ -263,9 +264,8 @@ and the page URL:
 - at least one non-ad source message missing from the digest (Ad Messages are
   expected to be skipped, so they don't count).
 - zero `big_news` stories despite there being source messages. This is checked
-  independently of coverage, because it is the exact shape of the failure
-  where the model returns `big_news` as an unparseable JSON string and it is
-  silently replaced with an empty list.
+  independently of coverage, because a model that returns no big stories out of
+  a full inbox is itself a sign something went wrong.
 
 Sending an alert can never break a run: the send is wrapped in `try/except`, a
 failure to deliver is logged (along with the text that could not be delivered),

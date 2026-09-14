@@ -944,9 +944,10 @@ def check_digest_health(
     ``issues`` is empty for a healthy digest. Two independent signals: at
     least one non-ad source message missing from the digest (Ad Messages are
     expected to be skipped, so they don't count), and an empty ``big_news``
-    section despite there being source messages at all (the shape of the
-    2026-08-28 incident, where the model returned big_news as an unparseable
-    string and normalize_digest substituted an empty list).
+    section despite there being source messages at all (a model that reports
+    no big stories out of a full inbox is itself suspicious — a genuinely
+    unparseable ``big_news`` field, like the shape of the 2026-08-28 incident,
+    is instead caught earlier as a ``DigestParseError`` and never reaches here).
     """
     cov = compute_coverage(digest, source_map)
     issues: list[str] = []
