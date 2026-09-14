@@ -319,7 +319,11 @@ summary:hover { background: #e0e0e0; }
 .further-reading a:hover { text-decoration: underline; }
 ul.minor-news { list-style: none; padding: 0; margin: 0; }
 ul.minor-news li { margin-bottom: 0.4rem; padding: 0.5rem 0.75rem; background: white; border-radius: 6px; }
-ul.minor-news li > details > summary { cursor: pointer; font-size: 0.95rem; color: #222; background: none; padding: 0; display: block; }
+ul.minor-news li:hover { background: #fafafa; }
+ul.minor-news li > details > summary { cursor: pointer; font-size: 0.95rem; color: #222; background: none; padding: 0; padding-inline-start: 1.1rem; display: block; position: relative; list-style: none; }
+ul.minor-news li > details > summary::-webkit-details-marker { display: none; }
+ul.minor-news li > details > summary::after { content: "▾"; position: absolute; inset-inline-start: 0; top: 0; display: inline-block; transform: rotate(90deg); transition: transform 0.15s; }
+ul.minor-news li > details[open] > summary::after { transform: rotate(0deg); }
 .channel-stats, .diagnostics { max-width: 800px; margin: 1rem auto; padding: 0 1.5rem; }
 .channel-stats h2 { font-size: 1.1rem; border-bottom: 1px solid #ccc; padding-bottom: 0.3rem; }
 .channel-stats ul { list-style: none; padding: 0; margin: 0.5rem 0; }
