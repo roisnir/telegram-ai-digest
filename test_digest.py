@@ -547,6 +547,30 @@ class TestBuildHtmlPage:
     def test_minor_news_li_is_details(self):
         assert "<li><details>" in self._build()
 
+    def test_minor_news_summary_has_chevron_after(self):
+        assert "ul.minor-news li > details > summary::after" in self._build()
+
+    def test_minor_news_summary_open_state_rule_present(self):
+        assert "ul.minor-news li > details[open] > summary::after" in self._build()
+
+    def test_minor_news_chevron_uses_logical_inline_positioning(self):
+        page = self._build()
+        style_start = page.index("<style>")
+        style_end = page.index("</style>")
+        css = page[style_start:style_end]
+        assert "inset-inline-start" in css or "padding-inline-start" in css
+        for line in css.splitlines():
+            if "ul.minor-news li > details > summary" in line:
+                assert "left:" not in line
+                assert "padding-left" not in line
+
+    def test_minor_news_webkit_marker_suppressed(self):
+        assert "ul.minor-news li > details > summary::-webkit-details-marker" in self._build()
+
+    def test_minor_news_markup_unchanged(self):
+        page = self._build()
+        assert "<li><details><summary>כותרת קטנה</summary>" in page
+
     def test_multiple_links_produce_multiple_embeds(self):
         digest = {
             "date_range": "2026-05-13",
