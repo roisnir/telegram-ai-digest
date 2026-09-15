@@ -1052,8 +1052,10 @@ async def send_whatsapp(text: str) -> str | None:
             proc.kill()
             return f"WhatsApp send timed out after {WA_SEND_TIMEOUT}s"
         if proc.returncode != 0:
-            tail = _truncated(stderr.decode(errors='replace').strip(), 400)
-            return f"WhatsApp send exited {proc.returncode}: {tail}"
+            err = stderr.decode(errors='replace').strip()
+            # Full stderr to the log for diagnosis; the alert stays phone-sized.
+            logging.error(f"WhatsApp send stderr:\n{err}")
+            return f"WhatsApp send exited {proc.returncode}: {_truncated(err, 200)}"
         logging.info(f"WhatsApp digest sent to {WHATSAPP_CHANNEL_JID}")
         return None
     except Exception as e:
