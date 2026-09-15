@@ -1,0 +1,13 @@
+{
+  "name": "wa-send",
+  "private": true,
+  "description": "Minimal Baileys sender: posts a message from stdin to a WhatsApp channel. Runs in parallel to the Telegram delivery.",
+  "type": "module",
+  "scripts": {
+    "jid": "node send.js --jid"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.24",
+    "qrcode-terminal": "^0.12.0"
+  }
+}

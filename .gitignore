@@ -9,3 +9,5 @@ dry-run-output.txt
 embed-test.html
 scripts/browser-qa/node_modules/
 *.tar.gz
+scripts/wa/node_modules/
+scripts/wa/auth/

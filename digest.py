@@ -30,7 +30,15 @@ def load_env_from_file(env_file: str = '.env') -> None:
                 line = line.strip()
                 if line and not line.startswith('#'):
                     key, value = line.split('=', 1)
-                    os.environ[key.strip()] = value.strip()
+                    value = value.strip()
+                    # Quoting a value is normal .env style, and every dotenv
+                    # implementation unwraps it. Not doing so silently smuggles the
+                    # quotes into the value -- WHATSAPP_CHANNEL_JID='x@newsletter'
+                    # became a JID whose server was "newsletter'", which Baileys
+                    # sent down the DM path instead of the channel path.
+                    if len(value) >= 2 and value[0] == value[-1] and value[0] in '\'"':
+                        value = value[1:-1]
+                    os.environ[key.strip()] = value
     else:
         logging.warning(f".env file not found at {env_path.absolute()}. Using system environment variables.")
 
@@ -68,6 +76,14 @@ except ValueError as e:
 # messaged that bot at least once (or if ALERT_CHAT_ID is a group/channel the
 # bot is in). Otherwise use the user session (leave BOT_TOKEN unset) or 'me'.
 ALERT_CHAT_ID = os.getenv('ALERT_CHAT_ID')
+
+
+# Optional WhatsApp channel delivery, in parallel to Telegram (never instead of
+# it). Unset WHATSAPP_CHANNEL_JID => the feature is entirely off. Get the JID
+# with: node scripts/wa/send.js --jid <channel invite link>
+WHATSAPP_CHANNEL_JID = os.getenv('WHATSAPP_CHANNEL_JID')
+WA_SEND_SCRIPT = Path(__file__).resolve().parent / 'scripts' / 'wa' / 'send.js'
+WA_SEND_TIMEOUT = 120  # Baileys can hang on a dead session; never block the run forever
 
 
 # ---------------------------------------------------------------------------
@@ -179,6 +195,27 @@ def format_telegram_message(digest: dict[str, Any], end_date: datetime, page_url
     if lines:
         return f"{page_url}\n\n{title}\n\n" + "\n\n".join(lines)
     return f"{page_url}\n\n{title}"
+
+
+def format_whatsapp_message(digest: dict[str, Any], end_date: datetime, page_url: str) -> str:
+    """Plain-text twin of the Telegram message.
+
+    WhatsApp has no rich links, so the per-item source/time meta is dropped
+    rather than flattened into bare URLs — headlines plus the page link at the
+    top, which carries the sources anyway.
+    """
+    local = _local_end_date(end_date)
+    title = (
+        f"📰 עדכון {time_of_day_label(local.hour)} לשעה "
+        f"{local.strftime('%H:%M')} | {local.strftime('%d.%m.%Y')}"
+    )
+    lines = [
+        f"{SECTION_EMOJI.get(item.get('section', ''), '•')} {item['headline'].strip()}"
+        for item in digest.get("big_news", [])
+        if item.get("headline", "").strip()
+    ]
+    body = "\n\n".join(lines)
+    return f"{page_url}\n\n{title}\n\n{body}" if body else f"{page_url}\n\n{title}"
 
 
 # ---------------------------------------------------------------------------
@@ -998,6 +1035,56 @@ def format_health_alert(
     return "\n".join(lines)
 
 
+async def send_whatsapp(text: str, attempts: int = 2) -> str | None:
+    """Best-effort WhatsApp channel post. Never raises.
+
+    Off entirely when WHATSAPP_CHANNEL_JID is unset. Telegram is the
+    authoritative delivery path, so a WhatsApp failure is reported (returns the
+    reason) and the run still counts as successful.
+
+    Retried once: Baileys dies outright on a transient network timeout, which
+    escapes send.js's own reconnect handling, and the digest only runs twice a
+    day — a blip should not cost a whole post.
+    """
+    if not WHATSAPP_CHANNEL_JID:
+        return None
+    error = None
+    for attempt in range(1, attempts + 1):
+        error = await _wa_send_once(text)
+        if error is None:
+            return None
+        logging.warning(f"WhatsApp attempt {attempt}/{attempts} failed: {error}")
+    return error
+
+
+async def _wa_send_once(text: str) -> str | None:
+    """One `node send.js` invocation. Returns the failure reason, or None."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            'node', str(WA_SEND_SCRIPT),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env={**os.environ, 'WHATSAPP_CHANNEL_JID': WHATSAPP_CHANNEL_JID},
+        )
+        try:
+            _, stderr = await asyncio.wait_for(
+                proc.communicate(text.encode()), timeout=WA_SEND_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            return f"WhatsApp send timed out after {WA_SEND_TIMEOUT}s"
+        if proc.returncode != 0:
+            err = stderr.decode(errors='replace').strip()
+            # Full stderr to the log for diagnosis; the alert stays phone-sized.
+            logging.error(f"WhatsApp send stderr:\n{err}")
+            return f"WhatsApp send exited {proc.returncode}: {_truncated(err, 200)}"
+        logging.info(f"WhatsApp digest sent to {WHATSAPP_CHANNEL_JID}")
+        return None
+    except Exception as e:
+        return f"WhatsApp send failed ({type(e).__name__}: {e})"
+
+
 async def send_alert(text: str, client=None) -> bool:
     """Best-effort operator alert. Never raises.
 
@@ -1157,6 +1244,11 @@ async def run_digest(ctx: dict[str, Any]) -> None:
             await bot.disconnect()
         else:
             await client.send_message(target, message, parse_mode='html')
+
+        wa_error = await send_whatsapp(format_whatsapp_message(digest, end_date, page_url))
+        if wa_error:
+            logging.error(wa_error)
+            await send_alert(f"⚠️ {wa_error}\nTelegram delivery was fine.", ctx.get('client'))
 
     issues, coverage = check_digest_health(digest, source_map)
     if issues:

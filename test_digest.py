@@ -1,16 +1,20 @@
 import asyncio
 import json
 import logging
+import os
 import pytest
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 from pytz import UTC, timezone
 
 from digest import (
+    load_env_from_file,
     DigestParseError,
     normalize_digest,
     time_of_day_label,
     format_telegram_message,
+    format_whatsapp_message,
+    send_whatsapp,
     build_html_page,
     build_channel_sources,
     compute_channel_stats,
@@ -353,6 +357,102 @@ class TestFormatTelegramMessage:
 # ---------------------------------------------------------------------------
 # extract_media_info
 # ---------------------------------------------------------------------------
+
+class TestLoadEnvFromFile:
+    """The .env loader is hand-rolled, so quoting rules are ours to get right."""
+
+    def _load(self, tmp_path, line):
+        env = tmp_path / ".env"
+        env.write_text(line + "\n")
+        with patch.dict("os.environ", {}, clear=False):
+            load_env_from_file(str(env))
+            return os.environ.get("K")
+
+    def test_bare_value(self, tmp_path):
+        assert self._load(tmp_path, "K=123@newsletter") == "123@newsletter"
+
+    def test_single_quotes_are_stripped(self, tmp_path):
+        assert self._load(tmp_path, "K='123@newsletter'") == "123@newsletter"
+
+    def test_double_quotes_are_stripped(self, tmp_path):
+        assert self._load(tmp_path, 'K="123@newsletter"') == "123@newsletter"
+
+    def test_trailing_whitespace_is_stripped(self, tmp_path):
+        assert self._load(tmp_path, "K=123@newsletter   ") == "123@newsletter"
+
+    def test_lone_quote_is_left_alone(self, tmp_path):
+        # Not a matching pair, so it is part of the value.
+        assert self._load(tmp_path, "K=it's") == "it's"
+
+    def test_inner_quotes_survive(self, tmp_path):
+        assert self._load(tmp_path, """K=a"b""") == 'a"b'
+
+
+class TestFormatWhatsappMessage:
+    URL = "https://telegra.ph/test"
+    DIGEST = TestFormatTelegramMessage.DIGEST
+
+    def test_page_url_first(self):
+        assert format_whatsapp_message(self.DIGEST, MORNING_IL, self.URL).startswith(self.URL)
+
+    def test_headline_and_local_time(self):
+        msg = format_whatsapp_message(self.DIGEST, MORNING_IL, self.URL)
+        assert "כותרת ראשית" in msg
+        assert "07:00" in msg
+
+    def test_no_html_markup(self):
+        # WhatsApp renders no HTML — a stray <a href> would show up as literal text
+        assert "<" not in format_whatsapp_message(self.DIGEST, MORNING_IL, self.URL)
+
+    def test_empty_digest_is_just_url_and_title(self):
+        msg = format_whatsapp_message({"big_news": [], "minor_news": []}, MORNING_IL, self.URL)
+        assert msg == f"{self.URL}\n\n📰 עדכון בוקר לשעה 07:00 | 13.05.2026"
+
+
+class TestSendWhatsapp:
+    def test_off_when_jid_unset(self):
+        with patch("digest.WHATSAPP_CHANNEL_JID", None):
+            with patch("asyncio.create_subprocess_exec") as spawn:
+                assert asyncio.run(send_whatsapp("hi")) is None
+                spawn.assert_not_called()
+
+    @staticmethod
+    def _run(proc_or_exc):
+        kw = {"side_effect": proc_or_exc} if isinstance(proc_or_exc, Exception) else {"return_value": proc_or_exc}
+        with patch("digest.WHATSAPP_CHANNEL_JID", "1@newsletter"):
+            with patch("asyncio.create_subprocess_exec", AsyncMock(**kw)):
+                return asyncio.run(send_whatsapp("hi"))
+
+    @staticmethod
+    def _proc(returncode, stderr=b""):
+        proc = MagicMock(returncode=returncode)
+        proc.communicate = AsyncMock(return_value=(b"", stderr))
+        return proc
+
+    def test_nonzero_exit_reports_instead_of_raising(self):
+        assert "boom" in self._run(self._proc(1, b"boom"))
+
+    def test_spawn_failure_reports_instead_of_raising(self):
+        assert "FileNotFoundError" in self._run(FileNotFoundError("node"))
+
+    def test_success_returns_none(self):
+        assert self._run(self._proc(0)) is None
+
+    def test_transient_failure_is_retried(self):
+        # Baileys dies outright on a network timeout; the second try should win.
+        procs = [self._proc(1, b"Timed Out"), self._proc(0)]
+        with patch("digest.WHATSAPP_CHANNEL_JID", "1@newsletter"):
+            with patch("asyncio.create_subprocess_exec", AsyncMock(side_effect=procs)) as spawn:
+                assert asyncio.run(send_whatsapp("hi")) is None
+                assert spawn.call_count == 2
+
+    def test_reports_after_exhausting_attempts(self):
+        with patch("digest.WHATSAPP_CHANNEL_JID", "1@newsletter"):
+            with patch("asyncio.create_subprocess_exec",
+                       AsyncMock(side_effect=lambda *a, **k: self._proc(1, b"Timed Out"))) as spawn:
+                assert "Timed Out" in asyncio.run(send_whatsapp("hi"))
+                assert spawn.call_count == 2
+
 
 class TestExtractMediaInfo:
     def _msg(self, video=None, photo=None, document=None, file_duration=None):
