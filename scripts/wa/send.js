@@ -22,6 +22,8 @@ const RESOLVE = process.argv.includes('--jid');
 
 const log = (...a) => console.error(...a);
 
+let pendingSave = Promise.resolve();
+
 async function connect(attempt = 0) {
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const sock = makeWASocket({
@@ -30,7 +32,12 @@ async function connect(attempt = 0) {
     syncFullHistory: false,
     browser: ['telegram-ai-digest', 'Chrome', '1.0.0'],
   });
-  sock.ev.on('creds.update', saveCreds);
+  // saveCreds truncates-then-writes; exiting mid-write leaves a 0-byte
+  // creds.json and the next run is logged out. Serialise the saves and await
+  // the last one before the process exits.
+  sock.ev.on('creds.update', () => {
+    pendingSave = pendingSave.then(saveCreds).catch((e) => log(`creds save failed: ${e.message}`));
+  });
 
   return new Promise((resolve, reject) => {
     sock.ev.on('connection.update', (u) => {
@@ -77,5 +84,6 @@ if (RESOLVE) {
   log(`sent ${sent?.key?.id} to ${jid}`);
 }
 
+await pendingSave;
 await sock.ws.close();
 process.exit(0);
