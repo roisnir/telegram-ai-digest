@@ -30,7 +30,15 @@ def load_env_from_file(env_file: str = '.env') -> None:
                 line = line.strip()
                 if line and not line.startswith('#'):
                     key, value = line.split('=', 1)
-                    os.environ[key.strip()] = value.strip()
+                    value = value.strip()
+                    # Quoting a value is normal .env style, and every dotenv
+                    # implementation unwraps it. Not doing so silently smuggles the
+                    # quotes into the value -- WHATSAPP_CHANNEL_JID='x@newsletter'
+                    # became a JID whose server was "newsletter'", which Baileys
+                    # sent down the DM path instead of the channel path.
+                    if len(value) >= 2 and value[0] == value[-1] and value[0] in '\'"':
+                        value = value[1:-1]
+                    os.environ[key.strip()] = value
     else:
         logging.warning(f".env file not found at {env_path.absolute()}. Using system environment variables.")
 

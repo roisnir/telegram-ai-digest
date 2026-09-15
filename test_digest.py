@@ -1,12 +1,14 @@
 import asyncio
 import json
 import logging
+import os
 import pytest
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 from pytz import UTC, timezone
 
 from digest import (
+    load_env_from_file,
     DigestParseError,
     normalize_digest,
     time_of_day_label,
@@ -355,6 +357,36 @@ class TestFormatTelegramMessage:
 # ---------------------------------------------------------------------------
 # extract_media_info
 # ---------------------------------------------------------------------------
+
+class TestLoadEnvFromFile:
+    """The .env loader is hand-rolled, so quoting rules are ours to get right."""
+
+    def _load(self, tmp_path, line):
+        env = tmp_path / ".env"
+        env.write_text(line + "\n")
+        with patch.dict("os.environ", {}, clear=False):
+            load_env_from_file(str(env))
+            return os.environ.get("K")
+
+    def test_bare_value(self, tmp_path):
+        assert self._load(tmp_path, "K=123@newsletter") == "123@newsletter"
+
+    def test_single_quotes_are_stripped(self, tmp_path):
+        assert self._load(tmp_path, "K='123@newsletter'") == "123@newsletter"
+
+    def test_double_quotes_are_stripped(self, tmp_path):
+        assert self._load(tmp_path, 'K="123@newsletter"') == "123@newsletter"
+
+    def test_trailing_whitespace_is_stripped(self, tmp_path):
+        assert self._load(tmp_path, "K=123@newsletter   ") == "123@newsletter"
+
+    def test_lone_quote_is_left_alone(self, tmp_path):
+        # Not a matching pair, so it is part of the value.
+        assert self._load(tmp_path, "K=it's") == "it's"
+
+    def test_inner_quotes_survive(self, tmp_path):
+        assert self._load(tmp_path, """K=a"b""") == 'a"b'
+
 
 class TestFormatWhatsappMessage:
     URL = "https://telegra.ph/test"
