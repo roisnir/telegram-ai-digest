@@ -64,6 +64,18 @@ async function connect(attempt = 0) {
   });
 }
 
+// Baileys picks the send path off the JID's server part, and anything that is not
+// exactly `<id>@newsletter` silently becomes a 1:1 DM to a user id that does not
+// exist, which hangs in a device query until a 60s `Timed Out`. Quotes around the
+// value in .env are enough to do it, so check before spending a connection on it.
+if (!RESOLVE) {
+  const jid = process.env.WHATSAPP_CHANNEL_JID;
+  if (!jid) throw new Error('WHATSAPP_CHANNEL_JID not set');
+  if (!/^\d+@newsletter$/.test(jid)) {
+    throw new Error(`WHATSAPP_CHANNEL_JID must be <id>@newsletter, got ${JSON.stringify(jid)}`);
+  }
+}
+
 const sock = await connect();
 
 if (RESOLVE) {
@@ -77,7 +89,6 @@ if (RESOLVE) {
   console.log(meta.id);
 } else {
   const jid = process.env.WHATSAPP_CHANNEL_JID;
-  if (!jid) throw new Error('WHATSAPP_CHANNEL_JID not set');
   const text = readFileSync(0, 'utf8').trim();
   if (!text) throw new Error('empty message on stdin');
   const sent = await sock.sendMessage(jid, { text });
