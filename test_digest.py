@@ -406,6 +406,21 @@ class TestSendWhatsapp:
     def test_success_returns_none(self):
         assert self._run(self._proc(0)) is None
 
+    def test_transient_failure_is_retried(self):
+        # Baileys dies outright on a network timeout; the second try should win.
+        procs = [self._proc(1, b"Timed Out"), self._proc(0)]
+        with patch("digest.WHATSAPP_CHANNEL_JID", "1@newsletter"):
+            with patch("asyncio.create_subprocess_exec", AsyncMock(side_effect=procs)) as spawn:
+                assert asyncio.run(send_whatsapp("hi")) is None
+                assert spawn.call_count == 2
+
+    def test_reports_after_exhausting_attempts(self):
+        with patch("digest.WHATSAPP_CHANNEL_JID", "1@newsletter"):
+            with patch("asyncio.create_subprocess_exec",
+                       AsyncMock(side_effect=lambda *a, **k: self._proc(1, b"Timed Out"))) as spawn:
+                assert "Timed Out" in asyncio.run(send_whatsapp("hi"))
+                assert spawn.call_count == 2
+
 
 class TestExtractMediaInfo:
     def _msg(self, video=None, photo=None, document=None, file_duration=None):

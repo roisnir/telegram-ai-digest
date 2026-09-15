@@ -1027,15 +1027,30 @@ def format_health_alert(
     return "\n".join(lines)
 
 
-async def send_whatsapp(text: str) -> str | None:
+async def send_whatsapp(text: str, attempts: int = 2) -> str | None:
     """Best-effort WhatsApp channel post. Never raises.
 
     Off entirely when WHATSAPP_CHANNEL_JID is unset. Telegram is the
     authoritative delivery path, so a WhatsApp failure is reported (returns the
     reason) and the run still counts as successful.
+
+    Retried once: Baileys dies outright on a transient network timeout, which
+    escapes send.js's own reconnect handling, and the digest only runs twice a
+    day — a blip should not cost a whole post.
     """
     if not WHATSAPP_CHANNEL_JID:
         return None
+    error = None
+    for attempt in range(1, attempts + 1):
+        error = await _wa_send_once(text)
+        if error is None:
+            return None
+        logging.warning(f"WhatsApp attempt {attempt}/{attempts} failed: {error}")
+    return error
+
+
+async def _wa_send_once(text: str) -> str | None:
+    """One `node send.js` invocation. Returns the failure reason, or None."""
     try:
         proc = await asyncio.create_subprocess_exec(
             'node', str(WA_SEND_SCRIPT),
