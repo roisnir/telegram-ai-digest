@@ -141,7 +141,8 @@ Copy these files to a persistent directory on your server (e.g. `/opt/telegram-n
 ```
 /opt/telegram-news-digest/
 ├── .env             # your environment variables
-└── session.session  # generated during first-run auth above
+├── session.session  # generated during first-run auth above
+└── wa-auth/         # only if using WhatsApp: copy of scripts/wa/auth/ from the machine you paired on
 ```
 
 ### Run manually (test)
@@ -150,11 +151,17 @@ Copy these files to a persistent directory on your server (e.g. `/opt/telegram-n
 docker run --rm \
   -v /opt/telegram-news-digest/.env:/app/.env:ro \
   -v /opt/telegram-news-digest/session.session:/app/session.session \
+  -v /opt/telegram-news-digest/wa-auth:/app/scripts/wa/auth \
   -v /var/www/digest:/var/www/digest \
   telegram-ai-digest
 ```
 
 Mount `HTML_OUTPUT_DIR` (here `/var/www/digest`) as a volume so generated HTML files are written to the host and served by your web server.
+
+The image ships node and the Baileys deps, but QR pairing is interactive, so pair
+on a workstation (step 3) and copy `scripts/wa/auth/` to the server as `wa-auth/`.
+Mount it read-write — Baileys refreshes the session keys on every run. Drop that
+volume and the `WHATSAPP_CHANNEL_JID` line to run without WhatsApp.
 
 ## Scheduling with crontab
 
@@ -169,6 +176,7 @@ docker run --rm \
   -e DIGEST_IMAGE_HASH="$IMAGE_HASH" \
   -v /opt/telegram-news-digest/.env:/app/.env:ro \
   -v /opt/telegram-news-digest/session.session:/app/session.session \
+  -v /opt/telegram-news-digest/wa-auth:/app/scripts/wa/auth \
   -v /var/www/digest:/var/www/digest \
   "$IMAGE" >> /var/log/digest.log 2>&1
 ```
