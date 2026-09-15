@@ -11,6 +11,8 @@ from digest import (
     normalize_digest,
     time_of_day_label,
     format_telegram_message,
+    format_whatsapp_message,
+    send_whatsapp,
     build_html_page,
     build_channel_sources,
     compute_channel_stats,
@@ -353,6 +355,57 @@ class TestFormatTelegramMessage:
 # ---------------------------------------------------------------------------
 # extract_media_info
 # ---------------------------------------------------------------------------
+
+class TestFormatWhatsappMessage:
+    URL = "https://telegra.ph/test"
+    DIGEST = TestFormatTelegramMessage.DIGEST
+
+    def test_page_url_first(self):
+        assert format_whatsapp_message(self.DIGEST, MORNING_IL, self.URL).startswith(self.URL)
+
+    def test_headline_and_local_time(self):
+        msg = format_whatsapp_message(self.DIGEST, MORNING_IL, self.URL)
+        assert "כותרת ראשית" in msg
+        assert "07:00" in msg
+
+    def test_no_html_markup(self):
+        # WhatsApp renders no HTML — a stray <a href> would show up as literal text
+        assert "<" not in format_whatsapp_message(self.DIGEST, MORNING_IL, self.URL)
+
+    def test_empty_digest_is_just_url_and_title(self):
+        msg = format_whatsapp_message({"big_news": [], "minor_news": []}, MORNING_IL, self.URL)
+        assert msg == f"{self.URL}\n\n📰 עדכון בוקר לשעה 07:00 | 13.05.2026"
+
+
+class TestSendWhatsapp:
+    def test_off_when_jid_unset(self):
+        with patch("digest.WHATSAPP_CHANNEL_JID", None):
+            with patch("asyncio.create_subprocess_exec") as spawn:
+                assert asyncio.run(send_whatsapp("hi")) is None
+                spawn.assert_not_called()
+
+    @staticmethod
+    def _run(proc_or_exc):
+        kw = {"side_effect": proc_or_exc} if isinstance(proc_or_exc, Exception) else {"return_value": proc_or_exc}
+        with patch("digest.WHATSAPP_CHANNEL_JID", "1@newsletter"):
+            with patch("asyncio.create_subprocess_exec", AsyncMock(**kw)):
+                return asyncio.run(send_whatsapp("hi"))
+
+    @staticmethod
+    def _proc(returncode, stderr=b""):
+        proc = MagicMock(returncode=returncode)
+        proc.communicate = AsyncMock(return_value=(b"", stderr))
+        return proc
+
+    def test_nonzero_exit_reports_instead_of_raising(self):
+        assert "boom" in self._run(self._proc(1, b"boom"))
+
+    def test_spawn_failure_reports_instead_of_raising(self):
+        assert "FileNotFoundError" in self._run(FileNotFoundError("node"))
+
+    def test_success_returns_none(self):
+        assert self._run(self._proc(0)) is None
+
 
 class TestExtractMediaInfo:
     def _msg(self, video=None, photo=None, document=None, file_duration=None):

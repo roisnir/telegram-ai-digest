@@ -38,9 +38,29 @@ BOT_TOKEN=<optional_bot_token>          # if set, the digest message is sent by 
 HTML_OUTPUT_DIR=/var/www/digest          # local path where HTML files are written
 PUBLIC_BASE_URL=https://digest.example.com  # public URL prefix (no trailing slash)
 ALERT_CHAT_ID=me                         # optional; operator alerts (see below). Unset = alerts disabled
+WHATSAPP_CHANNEL_JID=123@newsletter      # optional; also post the digest to a WhatsApp channel (see below). Unset = disabled
 ```
 
-### 3. Authenticate Telegram (first run only)
+### 3. WhatsApp channel (optional)
+
+The digest can go to a WhatsApp channel **in parallel** to Telegram. Telegram is
+the authoritative path: if the WhatsApp send fails the run still succeeds, and
+the failure is reported through `ALERT_CHAT_ID`. Leave `WHATSAPP_CHANNEL_JID`
+unset to turn the whole thing off.
+
+```bash
+cd scripts/wa && npm install
+# pair the account (QR, first run only), and resolve your channel's JID:
+node send.js --jid 'https://whatsapp.com/channel/<code>'   # link: channel → info → Share link
+```
+
+Put the printed `…@newsletter` JID in `WHATSAPP_CHANNEL_JID`. The WhatsApp
+session lives in `scripts/wa/auth/` — keep it, or you have to re-scan the QR.
+WhatsApp drops linked devices more readily than Telegram does; when that
+happens the send fails with `logged out`, and re-pairing means deleting that
+directory and running the command above again.
+
+### 4. Authenticate Telegram (first run only)
 
 Telethon requires interactive phone authentication on first run. Run the script locally once to generate the `session.session` file:
 
