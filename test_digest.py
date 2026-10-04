@@ -2,13 +2,18 @@ import asyncio
 import json
 import logging
 import os
+import subprocess
+import sys
 import pytest
 from datetime import datetime
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 from pytz import UTC, timezone
 
 from digest import (
-    load_env_from_file,
+    Config,
+    ConfigError,
+    load_config,
     DigestParseError,
     normalize_digest,
     time_of_day_label,
@@ -35,6 +40,41 @@ from digest import (
     _coerce_chat_id,
     LOCAL_TZ,
 )
+
+
+REPO_ROOT = Path(__file__).resolve().parent
+
+REQUIRED_ENV = {
+    'API_ID': '12345',
+    'API_HASH': 'testhash',
+    'PHONE_NUMBER': '+1234567890',
+    'CHANNEL_USERNAMES': 'testchannel',
+    'CLAUDE_API_KEY': 'test-key',
+    'TARGET_CHANNEL': '-1001234567890',
+    'HTML_OUTPUT_DIR': '/tmp/test-digests',
+    'PUBLIC_BASE_URL': 'https://example.com/digest',
+}
+
+
+def make_config(**overrides) -> Config:
+    base = dict(
+        api_id=12345,
+        api_hash='testhash',
+        phone_number='+1234567890',
+        channel_usernames=('testchannel',),
+        claude_api_key='test-key',
+        target_channel='-1001234567890',
+        html_output_dir='/tmp/test-digests',
+        public_base_url='https://example.com/digest',
+    )
+    return Config(**{**base, **overrides})
+
+
+@pytest.fixture(autouse=True)
+def _never_read_a_real_config():
+    """main() loads config. Every test gets a fixed one, so no .env or shell variable can leak in."""
+    with patch('digest.load_config', return_value=make_config()):
+        yield
 
 
 # ---------------------------------------------------------------------------
@@ -358,34 +398,106 @@ class TestFormatTelegramMessage:
 # extract_media_info
 # ---------------------------------------------------------------------------
 
-class TestLoadEnvFromFile:
-    """The .env loader is hand-rolled, so quoting rules are ours to get right."""
+MISSING_ENV_FILE = '/nonexistent/dir/.env'
+
+
+class TestLoadConfig:
+    def test_all_required_present_builds_config(self):
+        assert load_config(environ=dict(REQUIRED_ENV), env_file=MISSING_ENV_FILE) == make_config()
+
+    def test_values_are_converted(self):
+        environ = {**REQUIRED_ENV, 'API_ID': '987', 'CHANNEL_USERNAMES': ' a , b ,c ',
+                   'PUBLIC_BASE_URL': 'https://x.test/d//'}
+        cfg = load_config(environ=environ, env_file=MISSING_ENV_FILE)
+        assert cfg.api_id == 987
+        assert cfg.channel_usernames == ('a', 'b', 'c')
+        assert cfg.public_base_url == 'https://x.test/d'
+
+    def test_optional_settings_default_to_none(self):
+        cfg = load_config(environ=dict(REQUIRED_ENV), env_file=MISSING_ENV_FILE)
+        assert cfg.bot_token is None
+        assert cfg.alert_chat_id is None
+        assert cfg.whatsapp_channel_jid is None
+
+    def test_optional_settings_are_read_when_set(self):
+        environ = {**REQUIRED_ENV, 'BOT_TOKEN': 'tok', 'ALERT_CHAT_ID': '@op',
+                   'WHATSAPP_CHANNEL_JID': '1@newsletter'}
+        cfg = load_config(environ=environ, env_file=MISSING_ENV_FILE)
+        assert (cfg.bot_token, cfg.alert_chat_id, cfg.whatsapp_channel_jid) == ('tok', '@op', '1@newsletter')
+
+    @pytest.mark.parametrize('name', list(REQUIRED_ENV))
+    def test_missing_required_setting_is_named(self, name):
+        environ = {k: v for k, v in REQUIRED_ENV.items() if k != name}
+        with pytest.raises(ConfigError, match=f"Environment variable '{name}' is not set"):
+            load_config(environ=environ, env_file=MISSING_ENV_FILE)
+
+    def test_env_file_overrides_environ(self, tmp_path):
+        env = tmp_path / ".env"
+        env.write_text("API_ID=999\n")
+        cfg = load_config(environ={**REQUIRED_ENV, 'API_ID': '1'}, env_file=env)
+        assert cfg.api_id == 999
+
+    def test_env_file_supplies_settings_missing_from_environ(self, tmp_path):
+        env = tmp_path / ".env"
+        env.write_text("API_HASH=fromfile\n")
+        environ = {k: v for k, v in REQUIRED_ENV.items() if k != 'API_HASH'}
+        assert load_config(environ=environ, env_file=env).api_hash == 'fromfile'
+
+    def test_does_not_write_to_os_environ(self, tmp_path):
+        env = tmp_path / ".env"
+        env.write_text("LOAD_CONFIG_PROBE=1\n")
+        before = dict(os.environ)
+        load_config(environ=dict(REQUIRED_ENV), env_file=env)
+        assert dict(os.environ) == before
+
+    def test_no_env_file_falls_back_to_environ_and_warns(self, tmp_path, caplog):
+        with caplog.at_level('WARNING'):
+            cfg = load_config(environ=dict(REQUIRED_ENV), env_file=tmp_path / "missing.env")
+        assert cfg == make_config()
+        assert "not found" in caplog.text
+
+    def test_defaults_to_os_environ_and_dot_env_in_cwd(self, tmp_path, monkeypatch):
+        for k, v in REQUIRED_ENV.items():
+            monkeypatch.setenv(k, v)
+        monkeypatch.chdir(tmp_path)  # no .env here
+        assert load_config() == make_config()
+
+    def test_import_with_empty_environment_succeeds(self, tmp_path):
+        # Import must not read settings: with no env and no .env, it still loads.
+        result = subprocess.run(
+            [sys.executable, '-c', 'import digest'],
+            cwd=tmp_path, env={'PYTHONPATH': str(REPO_ROOT)},
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0, result.stderr
+
+
+class TestEnvFileParsing:
+    """The .env reader is hand-rolled, so quoting rules are ours to get right."""
 
     def _load(self, tmp_path, line):
         env = tmp_path / ".env"
         env.write_text(line + "\n")
-        with patch.dict("os.environ", {}, clear=False):
-            load_env_from_file(str(env))
-            return os.environ.get("K")
+        return load_config(environ=dict(REQUIRED_ENV), env_file=env).whatsapp_channel_jid
 
     def test_bare_value(self, tmp_path):
-        assert self._load(tmp_path, "K=123@newsletter") == "123@newsletter"
+        assert self._load(tmp_path, "WHATSAPP_CHANNEL_JID=123@newsletter") == "123@newsletter"
 
     def test_single_quotes_are_stripped(self, tmp_path):
-        assert self._load(tmp_path, "K='123@newsletter'") == "123@newsletter"
+        assert self._load(tmp_path, "WHATSAPP_CHANNEL_JID='123@newsletter'") == "123@newsletter"
 
     def test_double_quotes_are_stripped(self, tmp_path):
-        assert self._load(tmp_path, 'K="123@newsletter"') == "123@newsletter"
+        assert self._load(tmp_path, 'WHATSAPP_CHANNEL_JID="123@newsletter"') == "123@newsletter"
 
     def test_trailing_whitespace_is_stripped(self, tmp_path):
-        assert self._load(tmp_path, "K=123@newsletter   ") == "123@newsletter"
+        assert self._load(tmp_path, "WHATSAPP_CHANNEL_JID=123@newsletter   ") == "123@newsletter"
 
     def test_lone_quote_is_left_alone(self, tmp_path):
         # Not a matching pair, so it is part of the value.
-        assert self._load(tmp_path, "K=it's") == "it's"
+        assert self._load(tmp_path, "WHATSAPP_CHANNEL_JID=it's") == "it's"
 
     def test_inner_quotes_survive(self, tmp_path):
-        assert self._load(tmp_path, """K=a"b""") == 'a"b'
+        assert self._load(tmp_path, """WHATSAPP_CHANNEL_JID=a"b""") == 'a"b'
 
 
 class TestFormatWhatsappMessage:
@@ -410,18 +522,18 @@ class TestFormatWhatsappMessage:
 
 
 class TestSendWhatsapp:
-    def test_off_when_jid_unset(self):
-        with patch("digest.WHATSAPP_CHANNEL_JID", None):
-            with patch("asyncio.create_subprocess_exec") as spawn:
-                assert asyncio.run(send_whatsapp("hi")) is None
-                spawn.assert_not_called()
+    JID = "1@newsletter"
 
-    @staticmethod
-    def _run(proc_or_exc):
+    def test_off_when_jid_unset(self):
+        with patch("asyncio.create_subprocess_exec") as spawn:
+            assert asyncio.run(send_whatsapp(make_config(), "hi")) is None
+            spawn.assert_not_called()
+
+    @classmethod
+    def _run(cls, proc_or_exc):
         kw = {"side_effect": proc_or_exc} if isinstance(proc_or_exc, Exception) else {"return_value": proc_or_exc}
-        with patch("digest.WHATSAPP_CHANNEL_JID", "1@newsletter"):
-            with patch("asyncio.create_subprocess_exec", AsyncMock(**kw)):
-                return asyncio.run(send_whatsapp("hi"))
+        with patch("asyncio.create_subprocess_exec", AsyncMock(**kw)):
+            return asyncio.run(send_whatsapp(make_config(whatsapp_channel_jid=cls.JID), "hi"))
 
     @staticmethod
     def _proc(returncode, stderr=b""):
@@ -441,60 +553,17 @@ class TestSendWhatsapp:
     def test_transient_failure_is_retried(self):
         # Baileys dies outright on a network timeout; the second try should win.
         procs = [self._proc(1, b"Timed Out"), self._proc(0)]
-        with patch("digest.WHATSAPP_CHANNEL_JID", "1@newsletter"):
-            with patch("asyncio.create_subprocess_exec", AsyncMock(side_effect=procs)) as spawn:
-                assert asyncio.run(send_whatsapp("hi")) is None
-                assert spawn.call_count == 2
+        with patch("asyncio.create_subprocess_exec", AsyncMock(side_effect=procs)) as spawn:
+            cfg = make_config(whatsapp_channel_jid=self.JID)
+            assert asyncio.run(send_whatsapp(cfg, "hi")) is None
+            assert spawn.call_count == 2
 
     def test_reports_after_exhausting_attempts(self):
-        with patch("digest.WHATSAPP_CHANNEL_JID", "1@newsletter"):
-            with patch("asyncio.create_subprocess_exec",
-                       AsyncMock(side_effect=lambda *a, **k: self._proc(1, b"Timed Out"))) as spawn:
-                assert "Timed Out" in asyncio.run(send_whatsapp("hi"))
-                assert spawn.call_count == 2
-
-
-class TestExtractMediaInfo:
-    def _msg(self, video=None, photo=None, document=None, file_duration=None):
-        msg = Mock()
-        msg.video = video
-        msg.photo = photo
-        msg.document = document
-        msg.file = Mock()
-        msg.file.duration = file_duration
-        return msg
-
-    def test_video_returns_video_type(self):
-        msg = self._msg(video=object(), file_duration=90)
-        media_type, duration = extract_media_info(msg)
-        assert media_type == 'video'
-
-    def test_video_returns_duration_seconds(self):
-        msg = self._msg(video=object(), file_duration=90)
-        _, duration = extract_media_info(msg)
-        assert duration == 90
-
-    def test_photo_returns_photo_type(self):
-        msg = self._msg(photo=object())
-        media_type, duration = extract_media_info(msg)
-        assert media_type == 'photo'
-        assert duration is None
-
-    def test_document_returns_document_type(self):
-        msg = self._msg(document=object())
-        media_type, duration = extract_media_info(msg)
-        assert media_type == 'document'
-        assert duration is None
-
-    def test_text_only_returns_none_none(self):
-        msg = self._msg()
-        assert extract_media_info(msg) == (None, None)
-
-    def test_video_without_duration_returns_none_duration(self):
-        msg = self._msg(video=object(), file_duration=None)
-        media_type, duration = extract_media_info(msg)
-        assert media_type == 'video'
-        assert duration is None
+        with patch("asyncio.create_subprocess_exec",
+                   AsyncMock(side_effect=lambda *a, **k: self._proc(1, b"Timed Out"))) as spawn:
+            cfg = make_config(whatsapp_channel_jid=self.JID)
+            assert "Timed Out" in asyncio.run(send_whatsapp(cfg, "hi"))
+            assert spawn.call_count == 2
 
 
 # ---------------------------------------------------------------------------
@@ -1548,6 +1617,12 @@ class TestCreateDigestIntegration:
     START = datetime(2026, 5, 13, 8,  0, tzinfo=UTC)
     END   = datetime(2026, 5, 13, 12, 0, tzinfo=UTC)
 
+    def test_client_is_built_with_the_api_key_it_is_given(self):
+        p, _ = self._patch_ac(_anthropic_stub(big_news=[]))
+        with p as anthropic_cls:
+            asyncio.run(create_digest({"ch": ["msg"]}, self.START, self.END, "sk-given"))
+        assert anthropic_cls.call_args.kwargs["api_key"] == "sk-given"
+
     def _patch_ac(self, response):
         mock_ac = AsyncMock()
         inner = MagicMock()
@@ -1567,7 +1642,7 @@ class TestCreateDigestIntegration:
         p, _ = self._patch_ac(resp)
         with p:
             result = asyncio.run(create_digest(
-                {"ch": ["[08:00] כותרת\nLink: https://t.me/ch/1"]}, self.START, self.END
+                {"ch": ["[08:00] כותרת\nLink: https://t.me/ch/1"]}, self.START, self.END, "test-key"
             ))
         assert result is not None
         assert result["big_news"][0]["headline"] == "כותרת"
@@ -1576,7 +1651,7 @@ class TestCreateDigestIntegration:
     def test_empty_channel_dict_returns_none_without_api_call(self):
         p, mock_ac = self._patch_ac(_anthropic_stub())
         with p:
-            result = asyncio.run(create_digest({}, self.START, self.END))
+            result = asyncio.run(create_digest({}, self.START, self.END, "test-key"))
         assert result is None
         mock_ac.messages.stream.assert_not_called()
 
@@ -1587,13 +1662,13 @@ class TestCreateDigestIntegration:
         resp.usage = Mock(output_tokens=10)
         p, _ = self._patch_ac(resp)
         with p:
-            result = asyncio.run(create_digest({"ch": ["msg"]}, self.START, self.END))
+            result = asyncio.run(create_digest({"ch": ["msg"]}, self.START, self.END, "test-key"))
         assert result is None
 
     def test_api_called_with_publish_digest_tool(self):
         p, mock_ac = self._patch_ac(_anthropic_stub())
         with p:
-            asyncio.run(create_digest({"ch": ["msg"]}, self.START, self.END))
+            asyncio.run(create_digest({"ch": ["msg"]}, self.START, self.END, "test-key"))
         kwargs = mock_ac.messages.stream.call_args.kwargs
         assert kwargs["tool_choice"] == {"type": "tool", "name": "publish_digest"}
 
@@ -1602,7 +1677,7 @@ class TestCreateDigestIntegration:
         with p:
             asyncio.run(create_digest(
                 {"mychannel": ["[08:00] חדשות חשובות\nLink: https://t.me/mychannel/5"]},
-                self.START, self.END,
+                self.START, self.END, "test-key",
             ))
         user_content = mock_ac.messages.stream.call_args.kwargs["messages"][0]["content"]
         assert "@mychannel" in user_content
@@ -1617,7 +1692,7 @@ class TestCreateDigestIntegration:
         }])
         p, _ = self._patch_ac(resp)
         with p:
-            result = asyncio.run(create_digest({"ch": ["msg"]}, self.START, self.END))
+            result = asyncio.run(create_digest({"ch": ["msg"]}, self.START, self.END, "test-key"))
         item = result["big_news"][0]
         assert "link" not in item
         assert item["links"] == ["https://t.me/ch/1"]
@@ -1631,7 +1706,7 @@ class TestCreateDigestIntegration:
         resp.stop_reason = "max_tokens"
         p, _ = self._patch_ac(resp)
         with p:
-            result = asyncio.run(create_digest({"ch": ["msg"]}, self.START, self.END))
+            result = asyncio.run(create_digest({"ch": ["msg"]}, self.START, self.END, "test-key"))
         assert result is None
 
     def test_unparseable_big_news_returns_none(self):
@@ -1639,7 +1714,7 @@ class TestCreateDigestIntegration:
         resp = _anthropic_stub_raw(big_news='[{"headline": "כותרת", ')
         p, _ = self._patch_ac(resp)
         with p:
-            result = asyncio.run(create_digest({"ch": ["msg"]}, self.START, self.END))
+            result = asyncio.run(create_digest({"ch": ["msg"]}, self.START, self.END, "test-key"))
         assert result is None
 
     def test_valid_json_string_big_news_still_parses(self):
@@ -1651,7 +1726,7 @@ class TestCreateDigestIntegration:
         }]))
         p, _ = self._patch_ac(resp)
         with p:
-            result = asyncio.run(create_digest({"ch": ["msg"]}, self.START, self.END))
+            result = asyncio.run(create_digest({"ch": ["msg"]}, self.START, self.END, "test-key"))
         assert result is not None
         assert result["big_news"][0]["headline"] == "כותרת"
         assert result["big_news"][0]["links"] == ["https://t.me/ch/1"]
@@ -1665,7 +1740,7 @@ class TestCreateDigestIntegration:
         resp.usage = Mock(output_tokens=50000)
         p, _ = self._patch_ac(resp)
         with p:
-            result = asyncio.run(create_digest({"ch": ["msg"]}, self.START, self.END))
+            result = asyncio.run(create_digest({"ch": ["msg"]}, self.START, self.END, "test-key"))
         assert result["_diagnostics"]["near_limit"] is True
 
     def test_near_limit_diagnostics_false(self):
@@ -1677,7 +1752,7 @@ class TestCreateDigestIntegration:
         resp.usage = Mock(output_tokens=1234)
         p, _ = self._patch_ac(resp)
         with p:
-            result = asyncio.run(create_digest({"ch": ["msg"]}, self.START, self.END))
+            result = asyncio.run(create_digest({"ch": ["msg"]}, self.START, self.END, "test-key"))
         assert result["_diagnostics"]["near_limit"] is False
 
     def test_html_warning_rendered_when_near_limit(self):
@@ -1995,32 +2070,31 @@ def _bot_factory():
 class TestSendAlert:
     def test_noop_when_alert_chat_id_unset(self):
         client = AsyncMock()
-        with patch('digest.ALERT_CHAT_ID', None), patch('digest.BOT_TOKEN', None), \
-             patch('digest.TelegramClient') as tg:
-            assert asyncio.run(send_alert("boom", client)) is False
+        with patch('digest.TelegramClient') as tg:
+            assert asyncio.run(send_alert(make_config(alert_chat_id=None), "boom", client)) is False
         client.send_message.assert_not_called()
         tg.assert_not_called()
 
     def test_noop_when_alert_chat_id_empty_string(self):
-        with patch('digest.ALERT_CHAT_ID', ''), patch('digest.TelegramClient') as tg:
-            assert asyncio.run(send_alert("boom")) is False
+        with patch('digest.TelegramClient') as tg:
+            assert asyncio.run(send_alert(make_config(alert_chat_id=''), "boom")) is False
         tg.assert_not_called()
 
     def test_sends_via_bot_when_bot_token_set(self):
         factory, bot = _bot_factory()
         client = AsyncMock()
-        with patch('digest.ALERT_CHAT_ID', '123456'), patch('digest.BOT_TOKEN', 'tok'), \
-             patch('digest.TelegramClient', return_value=factory):
-            assert asyncio.run(send_alert("boom", client)) is True
+        cfg = make_config(alert_chat_id='123456', bot_token='tok')
+        with patch('digest.TelegramClient', return_value=factory):
+            assert asyncio.run(send_alert(cfg, "boom", client)) is True
         bot.send_message.assert_awaited_once_with(123456, "boom")
         bot.disconnect.assert_awaited_once()
         client.send_message.assert_not_called()
 
     def test_sends_via_supplied_user_client_without_bot_token(self):
         client = AsyncMock()
-        with patch('digest.ALERT_CHAT_ID', '@operator'), patch('digest.BOT_TOKEN', None), \
-             patch('digest.TelegramClient') as tg:
-            assert asyncio.run(send_alert("boom", client)) is True
+        cfg = make_config(alert_chat_id='@operator')
+        with patch('digest.TelegramClient') as tg:
+            assert asyncio.run(send_alert(cfg, "boom", client)) is True
         client.send_message.assert_awaited_once_with("@operator", "boom")
         # The caller still owns the session it passed in.
         client.disconnect.assert_not_called()
@@ -2028,19 +2102,19 @@ class TestSendAlert:
 
     def test_starts_own_user_session_when_no_client_and_no_bot(self):
         own = AsyncMock()
-        with patch('digest.ALERT_CHAT_ID', 'me'), patch('digest.BOT_TOKEN', None), \
-             patch('digest.TelegramClient', return_value=own):
-            assert asyncio.run(send_alert("boom")) is True
-        own.start.assert_awaited_once()
+        cfg = make_config(alert_chat_id='me')
+        with patch('digest.TelegramClient', return_value=own) as tg:
+            assert asyncio.run(send_alert(cfg, "boom")) is True
+        tg.assert_called_once_with('session', cfg.api_id, cfg.api_hash)
+        own.start.assert_awaited_once_with(phone=cfg.phone_number)
         own.send_message.assert_awaited_once_with("me", "boom")
         own.disconnect.assert_awaited_once()
 
     def test_send_failure_is_logged_and_swallowed(self, caplog):
         client = AsyncMock()
         client.send_message = AsyncMock(side_effect=RuntimeError("peer not found"))
-        with patch('digest.ALERT_CHAT_ID', '123'), patch('digest.BOT_TOKEN', None):
-            with caplog.at_level('ERROR'):
-                assert asyncio.run(send_alert("boom", client)) is False
+        with caplog.at_level('ERROR'):
+            assert asyncio.run(send_alert(make_config(alert_chat_id='123'), "boom", client)) is False
         assert "Failed to send operator alert" in caplog.text
         assert "peer not found" in caplog.text
         assert "boom" in caplog.text  # the alert we could not deliver is still logged
@@ -2048,21 +2122,37 @@ class TestSendAlert:
     def test_bot_start_failure_is_swallowed(self):
         factory = MagicMock()
         factory.start = AsyncMock(side_effect=RuntimeError("bad token"))
-        with patch('digest.ALERT_CHAT_ID', '123'), patch('digest.BOT_TOKEN', 'tok'), \
-             patch('digest.TelegramClient', return_value=factory):
-            assert asyncio.run(send_alert("boom")) is False
+        cfg = make_config(alert_chat_id='123', bot_token='tok')
+        with patch('digest.TelegramClient', return_value=factory):
+            assert asyncio.run(send_alert(cfg, "boom")) is False
 
     def test_disconnect_failure_is_swallowed(self):
         factory, bot = _bot_factory()
         bot.disconnect = AsyncMock(side_effect=RuntimeError("already closed"))
-        with patch('digest.ALERT_CHAT_ID', '123'), patch('digest.BOT_TOKEN', 'tok'), \
-             patch('digest.TelegramClient', return_value=factory):
-            assert asyncio.run(send_alert("boom")) is True
+        cfg = make_config(alert_chat_id='123', bot_token='tok')
+        with patch('digest.TelegramClient', return_value=factory):
+            assert asyncio.run(send_alert(cfg, "boom")) is True
 
 
 # ---------------------------------------------------------------------------
 # main() alerting (mocks TelegramClient + Anthropic at the network boundary)
 # ---------------------------------------------------------------------------
+
+class TestMainStartup:
+    def test_missing_setting_exits_before_any_run_or_alert(self, caplog):
+        def real_loader():
+            return load_config(environ={}, env_file=MISSING_ENV_FILE)
+        with patch('digest.load_config', side_effect=real_loader), \
+             patch('digest.TelegramClient') as tg, \
+             patch('digest.send_alert') as alert, \
+             patch('sys.argv', ['digest.py', '--dry-run']):
+            with caplog.at_level('ERROR'), pytest.raises(SystemExit) as exc:
+                asyncio.run(main())
+        assert exc.value.code == 1
+        assert "Environment variable 'API_ID' is not set." in caplog.text
+        tg.assert_not_called()
+        alert.assert_not_called()
+
 
 class TestMainPipelineAlerts:
     """Alerting behaviour of the full pipeline.
@@ -2076,16 +2166,16 @@ class TestMainPipelineAlerts:
     _setup     = TestMainPipeline._setup
 
     def _run(self, argv_extra, mock_tg, mock_ac, alert_chat_id='999'):
+        cfg = make_config(alert_chat_id=alert_chat_id)
         with patch('digest.TelegramClient', return_value=mock_tg), \
              patch('digest.anthropic.AsyncAnthropic', return_value=mock_ac), \
-             patch('digest.ALERT_CHAT_ID', alert_chat_id), \
-             patch('digest.BOT_TOKEN', None), \
+             patch('digest.load_config', return_value=cfg), \
              patch('sys.argv', ['digest.py', '--dry-run'] + argv_extra + self._DATE_ARGS):
             asyncio.run(main())
 
     @staticmethod
     def _link(msg_id):
-        # CHANNEL_USERNAMES is 'testchannel' (see conftest.py).
+        # make_config() uses channel_usernames=('testchannel',).
         return f"https://t.me/testchannel/{msg_id}"
 
     def _big_news(self, msg_ids):
