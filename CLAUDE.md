@@ -23,8 +23,9 @@ Matches `run_digest()` in `digest.py` today:
    is set)
 6. `check_digest_health()` / `compute_coverage()` — post-publish diagnostics (did the digest
    plausibly cover the fetched messages?)
-7. `send_alert()` — notifies the operator via `ALERT_CHAT_ID` if the run fails or
-   `check_digest_health()` flags the published digest as wrong (#33)
+7. `alerts.py` (`Alerts`) — notifies the operator via `ALERT_CHAT_ID` if the run fails or
+   `check_digest_health()` flags the published digest as wrong (#33). Every alert is built and
+   sent there; add a new alert kind as a method on `Alerts`
 
 ## Working in this repo
 Run `pytest` after every change (see `docs/testing-workflow.md` for what each tier covers).
@@ -41,7 +42,7 @@ CLAUDE_API_KEY=
 HTML_OUTPUT_DIR=
 PUBLIC_BASE_URL=
 BOT_TOKEN=            # optional: send the digest via a bot instead of the user account
-ALERT_CHAT_ID=        # optional: enables operator alerting, see send_alert()
+ALERT_CHAT_ID=        # optional: enables operator alerting, see alerts.py
 ```
 
 ## Agent skills

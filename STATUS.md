@@ -18,7 +18,7 @@ The full pipeline is implemented and functional:
 | Publish | `build_html_page()` — self-hosted HTML page, collapsible Telegram embeds for sources |
 | Notify | `format_telegram_message()` + `client.send_message()` (or a bot, if `BOT_TOKEN` is set) |
 | Health check | `check_digest_health()` / `compute_coverage()` — flags a published digest that looks wrong |
-| Alerting | `send_alert()` — operator alert via `ALERT_CHAT_ID` on run failure or an unhealthy digest (#33) |
+| Alerting | `alerts.py` (`Alerts`) — operator alert via `ALERT_CHAT_ID` on run failure or an unhealthy digest (#33) |
 
 ## Key files
 
@@ -48,7 +48,7 @@ CLAUDE_API_KEY=
 HTML_OUTPUT_DIR=
 PUBLIC_BASE_URL=
 BOT_TOKEN=            # optional: send the digest via a bot instead of the user account
-ALERT_CHAT_ID=        # optional: enables operator alerting, see send_alert()
+ALERT_CHAT_ID=        # optional: enables operator alerting, see alerts.py
 ```
 
 ## First run / one-time setup
