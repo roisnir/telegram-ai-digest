@@ -5,6 +5,8 @@ import asyncio
 import json
 import logging
 import argparse
+from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -22,66 +24,84 @@ OUTPUT_TOKEN_WARN_THRESHOLD = 48000  # 75% of the model's 64K output ceiling
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
-def load_env_from_file(env_file: str = '.env') -> None:
+class ConfigError(ValueError):
+    """A required setting is missing. The message names the setting."""
+
+
+@dataclass(frozen=True)
+class Config:
+    api_id: int
+    api_hash: str
+    phone_number: str
+    channel_usernames: tuple[str, ...]
+    claude_api_key: str
+    target_channel: str
+    html_output_dir: str
+    public_base_url: str  # already rstrip('/')'d
+    # Optional: send the digest via a bot instead of the user account.
+    bot_token: str | None = None
+    # Optional operator alerting. Unset => the feature is entirely off.
+    # Accepts a numeric Telegram user id, an '@username', or the literal 'me'
+    # (the sending account's own Saved Messages).
+    # NOTE: a Telegram bot cannot open a conversation with a user. If BOT_TOKEN is
+    # set the alert is sent by the bot, which only works once the operator has
+    # messaged that bot at least once (or if ALERT_CHAT_ID is a group/channel the
+    # bot is in). Otherwise use the user session (leave BOT_TOKEN unset) or 'me'.
+    alert_chat_id: str | None = None
+    # Optional WhatsApp channel delivery, in parallel to Telegram (never instead of
+    # it). Get the JID with: node scripts/wa/send.js --jid <channel invite link>
+    whatsapp_channel_jid: str | None = None
+
+
+def _read_env_file(env_file: Path | str) -> dict[str, str]:
     env_path = Path(env_file)
-    if env_path.exists():
-        with env_path.open() as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#'):
-                    key, value = line.split('=', 1)
-                    value = value.strip()
-                    # Quoting a value is normal .env style, and every dotenv
-                    # implementation unwraps it. Not doing so silently smuggles the
-                    # quotes into the value -- WHATSAPP_CHANNEL_JID='x@newsletter'
-                    # became a JID whose server was "newsletter'", which Baileys
-                    # sent down the DM path instead of the channel path.
-                    if len(value) >= 2 and value[0] == value[-1] and value[0] in '\'"':
-                        value = value[1:-1]
-                    os.environ[key.strip()] = value
-    else:
+    if not env_path.exists():
         logging.warning(f".env file not found at {env_path.absolute()}. Using system environment variables.")
+        return {}
+    values: dict[str, str] = {}
+    with env_path.open() as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#'):
+                key, value = line.split('=', 1)
+                value = value.strip()
+                # Quoting a value is normal .env style, and every dotenv
+                # implementation unwraps it. Not doing so silently smuggles the
+                # quotes into the value -- WHATSAPP_CHANNEL_JID='x@newsletter'
+                # became a JID whose server was "newsletter'", which Baileys
+                # sent down the DM path instead of the channel path.
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in '\'"':
+                    value = value[1:-1]
+                values[key.strip()] = value
+    return values
 
 
-load_env_from_file()
+def load_config(environ: Mapping[str, str] | None = None, env_file: Path | str = '.env') -> Config:
+    """Gather the settings for a run. ``.env`` wins over ``environ``. Nothing is written back."""
+    env = {**(os.environ if environ is None else environ), **_read_env_file(env_file)}
+
+    def required(name: str) -> str:
+        value = env.get(name)
+        if value is None:
+            raise ConfigError(f"Environment variable '{name}' is not set.")
+        return value
+
+    return Config(
+        api_id=int(required('API_ID')),
+        api_hash=required('API_HASH'),
+        phone_number=required('PHONE_NUMBER'),
+        channel_usernames=tuple(c.strip() for c in required('CHANNEL_USERNAMES').split(',')),
+        claude_api_key=required('CLAUDE_API_KEY'),
+        target_channel=required('TARGET_CHANNEL'),
+        html_output_dir=required('HTML_OUTPUT_DIR'),
+        public_base_url=required('PUBLIC_BASE_URL').rstrip('/'),
+        bot_token=env.get('BOT_TOKEN'),
+        alert_chat_id=env.get('ALERT_CHAT_ID'),
+        whatsapp_channel_jid=env.get('WHATSAPP_CHANNEL_JID'),
+    )
 
 
-def get_env_variable(var_name: str) -> str:
-    value = os.getenv(var_name)
-    if value is None:
-        raise ValueError(f"Environment variable '{var_name}' is not set.")
-    return value
-
-
-try:
-    API_ID = int(get_env_variable('API_ID'))
-    API_HASH = get_env_variable('API_HASH')
-    PHONE_NUMBER = get_env_variable('PHONE_NUMBER')
-    CHANNEL_USERNAMES = [c.strip() for c in get_env_variable('CHANNEL_USERNAMES').split(',')]
-    CLAUDE_API_KEY = get_env_variable('CLAUDE_API_KEY')
-    TARGET_CHANNEL = get_env_variable('TARGET_CHANNEL')
-    HTML_OUTPUT_DIR = get_env_variable('HTML_OUTPUT_DIR')
-    PUBLIC_BASE_URL = get_env_variable('PUBLIC_BASE_URL').rstrip('/')
-    BOT_TOKEN = os.getenv('BOT_TOKEN')  # optional: send digest via bot instead of user account
-except ValueError as e:
-    logging.error(f"Environment variable error: {str(e)}")
-    raise
-
-
-# Optional operator alerting. Unset ALERT_CHAT_ID => the feature is entirely off.
-# Accepts a numeric Telegram user id, an '@username', or the literal 'me'
-# (the sending account's own Saved Messages).
-# NOTE: a Telegram bot cannot open a conversation with a user. If BOT_TOKEN is
-# set the alert is sent by the bot, which only works once the operator has
-# messaged that bot at least once (or if ALERT_CHAT_ID is a group/channel the
-# bot is in). Otherwise use the user session (leave BOT_TOKEN unset) or 'me'.
-ALERT_CHAT_ID = os.getenv('ALERT_CHAT_ID')
-
-
-# Optional WhatsApp channel delivery, in parallel to Telegram (never instead of
-# it). Unset WHATSAPP_CHANNEL_JID => the feature is entirely off. Get the JID
-# with: node scripts/wa/send.js --jid <channel invite link>
-WHATSAPP_CHANNEL_JID = os.getenv('WHATSAPP_CHANNEL_JID')
+# WhatsApp delivery script; see send_whatsapp().
 WA_SEND_SCRIPT = Path(__file__).resolve().parent / 'scripts' / 'wa' / 'send.js'
 WA_SEND_TIMEOUT = 120  # Baileys can hang on a dead session; never block the run forever
 
@@ -310,6 +330,7 @@ async def create_digest(
     messages_by_channel: dict[str, list[str]],
     start_date: datetime,
     end_date: datetime,
+    api_key: str,
 ) -> dict[str, Any] | None:
     total = sum(len(v) for v in messages_by_channel.values())
     if total == 0:
@@ -323,7 +344,7 @@ async def create_digest(
         combined += f"\n\n### Channel: @{channel}\n" + "\n".join(msgs)
 
     anthropic_client = anthropic.AsyncAnthropic(
-        api_key=CLAUDE_API_KEY,
+        api_key=api_key,
         timeout=anthropic.Timeout(300.0, connect=10.0),
     )
     async with anthropic_client.messages.stream(
@@ -1035,7 +1056,7 @@ def format_health_alert(
     return "\n".join(lines)
 
 
-async def send_whatsapp(text: str, attempts: int = 2) -> str | None:
+async def send_whatsapp(config: Config, text: str, attempts: int = 2) -> str | None:
     """Best-effort WhatsApp channel post. Never raises.
 
     Off entirely when WHATSAPP_CHANNEL_JID is unset. Telegram is the
@@ -1046,18 +1067,18 @@ async def send_whatsapp(text: str, attempts: int = 2) -> str | None:
     escapes send.js's own reconnect handling, and the digest only runs twice a
     day — a blip should not cost a whole post.
     """
-    if not WHATSAPP_CHANNEL_JID:
+    if not config.whatsapp_channel_jid:
         return None
     error = None
     for attempt in range(1, attempts + 1):
-        error = await _wa_send_once(text)
+        error = await _wa_send_once(config, text)
         if error is None:
             return None
         logging.warning(f"WhatsApp attempt {attempt}/{attempts} failed: {error}")
     return error
 
 
-async def _wa_send_once(text: str) -> str | None:
+async def _wa_send_once(config: Config, text: str) -> str | None:
     """One `node send.js` invocation. Returns the failure reason, or None."""
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -1065,7 +1086,7 @@ async def _wa_send_once(text: str) -> str | None:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env={**os.environ, 'WHATSAPP_CHANNEL_JID': WHATSAPP_CHANNEL_JID},
+            env={**os.environ, 'WHATSAPP_CHANNEL_JID': config.whatsapp_channel_jid},
         )
         try:
             _, stderr = await asyncio.wait_for(
@@ -1079,13 +1100,13 @@ async def _wa_send_once(text: str) -> str | None:
             # Full stderr to the log for diagnosis; the alert stays phone-sized.
             logging.error(f"WhatsApp send stderr:\n{err}")
             return f"WhatsApp send exited {proc.returncode}: {_truncated(err, 200)}"
-        logging.info(f"WhatsApp digest sent to {WHATSAPP_CHANNEL_JID}")
+        logging.info(f"WhatsApp digest sent to {config.whatsapp_channel_jid}")
         return None
     except Exception as e:
         return f"WhatsApp send failed ({type(e).__name__}: {e})"
 
 
-async def send_alert(text: str, client=None) -> bool:
+async def send_alert(config: Config, text: str, client=None) -> bool:
     """Best-effort operator alert. Never raises.
 
     Off entirely when ALERT_CHAT_ID is unset. Prefers the bot when BOT_TOKEN is
@@ -1097,20 +1118,20 @@ async def send_alert(text: str, client=None) -> bool:
     but alert bodies embed arbitrary exception text that would break HTML
     parsing and silently drop the alert.
     """
-    if not ALERT_CHAT_ID:
+    if not config.alert_chat_id:
         return False
     bot = None
     own_client = None
     try:
-        target = _coerce_chat_id(ALERT_CHAT_ID)
-        if BOT_TOKEN:
-            bot = await TelegramClient(StringSession(), API_ID, API_HASH).start(bot_token=BOT_TOKEN)
+        target = _coerce_chat_id(config.alert_chat_id)
+        if config.bot_token:
+            bot = await TelegramClient(StringSession(), config.api_id, config.api_hash).start(bot_token=config.bot_token)
             sender = bot
         elif client is not None:
             sender = client
         else:
-            own_client = TelegramClient('session', API_ID, API_HASH)
-            await own_client.start(phone=PHONE_NUMBER)
+            own_client = TelegramClient('session', config.api_id, config.api_hash)
+            await own_client.start(phone=config.phone_number)
             sender = own_client
         await sender.send_message(target, text)
         logging.info(f"Operator alert sent to {target}")
@@ -1135,7 +1156,7 @@ async def send_alert(text: str, client=None) -> bool:
 # Main
 # ---------------------------------------------------------------------------
 
-async def run_digest(ctx: dict[str, Any]) -> None:
+async def run_digest(config: Config, ctx: dict[str, Any]) -> None:
     """The digest pipeline. ``ctx`` collects state main() needs when alerting."""
     parser = argparse.ArgumentParser(description='Generate daily Telegram news update as HTML page.')
     parser.add_argument('--startdate', type=str, help='Start datetime YYYY-MM-DD or YYYY-MM-DD HH:MM (UTC)')
@@ -1174,14 +1195,14 @@ async def run_digest(ctx: dict[str, Any]) -> None:
         ctx['window'] = format_window(start_date, end_date)
         logging.info(f"Update period: {start_date} -> {end_date}")
 
-        client = TelegramClient('session', API_ID, API_HASH)
+        client = TelegramClient('session', config.api_id, config.api_hash)
         ctx['client'] = client
-        await client.start(phone=PHONE_NUMBER)
+        await client.start(phone=config.phone_number)
         logging.info("Connected to Telegram")
 
         messages_by_channel: dict[str, list[str]] = {}
         source_map: dict = {}
-        for username in CHANNEL_USERNAMES:
+        for username in config.channel_usernames:
             msgs, channel_source_map = await fetch_messages(client, username, start_date, end_date)
             if msgs:
                 messages_by_channel[username] = msgs
@@ -1193,6 +1214,7 @@ async def run_digest(ctx: dict[str, Any]) -> None:
             # exactly the "no digests arrived and nobody noticed" mode.
             logging.warning("No messages fetched from any channel — nothing to publish.")
             await send_alert(
+                config,
                 f"⚠️ No digest published.\nWindow: {ctx['window']}\n"
                 "No messages were fetched from any channel — quiet window, or a broken fetch.",
                 client,
@@ -1201,7 +1223,7 @@ async def run_digest(ctx: dict[str, Any]) -> None:
             return
 
         logging.info("Generating update via Claude...")
-        digest = await create_digest(messages_by_channel, start_date, end_date)
+        digest = await create_digest(messages_by_channel, start_date, end_date, config.claude_api_key)
 
         if not digest:
             # Covers every generation failure: unparseable tool output,
@@ -1209,6 +1231,7 @@ async def run_digest(ctx: dict[str, Any]) -> None:
             # published, and the process exits non-zero so cron/run.sh notice.
             logging.error("Failed to generate update — nothing published.")
             await send_alert(
+                config,
                 format_failure_alert(
                     "create_digest() returned no digest — output truncated at max_tokens, "
                     "or no tool_use block came back. See the run log.",
@@ -1228,32 +1251,33 @@ async def run_digest(ctx: dict[str, Any]) -> None:
     else:
         local = end_date.astimezone(LOCAL_TZ)
         filename = f"digest-{local.strftime('%Y-%m-%d-%H%M')}.html"
-        html_path = Path(HTML_OUTPUT_DIR) / filename
+        html_path = Path(config.html_output_dir) / filename
         html_path.parent.mkdir(parents=True, exist_ok=True)
 
     html_path.write_text(html_content, encoding='utf-8')
     logging.info(f"HTML digest saved: {html_path}")
-    page_url = f"{PUBLIC_BASE_URL}/{html_path.name}" if not args.output else str(html_path)
+    page_url = f"{config.public_base_url}/{html_path.name}" if not args.output else str(html_path)
 
     if not args.dry_run and not args.fixture:
-        target = int(TARGET_CHANNEL) if TARGET_CHANNEL.lstrip('-').isdigit() else TARGET_CHANNEL
+        target = int(config.target_channel) if config.target_channel.lstrip('-').isdigit() else config.target_channel
         message = format_telegram_message(digest, end_date, page_url)
-        if BOT_TOKEN:
-            bot = await TelegramClient(StringSession(), API_ID, API_HASH).start(bot_token=BOT_TOKEN)
+        if config.bot_token:
+            bot = await TelegramClient(StringSession(), config.api_id, config.api_hash).start(bot_token=config.bot_token)
             await bot.send_message(target, message, parse_mode='html')
             await bot.disconnect()
         else:
             await client.send_message(target, message, parse_mode='html')
 
-        wa_error = await send_whatsapp(format_whatsapp_message(digest, end_date, page_url))
+        wa_error = await send_whatsapp(config, format_whatsapp_message(digest, end_date, page_url))
         if wa_error:
             logging.error(wa_error)
-            await send_alert(f"⚠️ {wa_error}\nTelegram delivery was fine.", ctx.get('client'))
+            await send_alert(config, f"⚠️ {wa_error}\nTelegram delivery was fine.", ctx.get('client'))
 
     issues, coverage = check_digest_health(digest, source_map)
     if issues:
         logging.warning(f"Digest published but looks wrong: {'; '.join(issues)}")
         await send_alert(
+            config,
             format_health_alert(issues, coverage, ctx.get('window', 'unknown window'), page_url),
             ctx.get('client'),
         )
@@ -1265,12 +1289,19 @@ async def run_digest(ctx: dict[str, Any]) -> None:
 
 async def main() -> None:
     """Run the digest, alerting the operator on failure. Re-raises after alerting."""
+    try:
+        config = load_config()
+    except ConfigError as e:
+        # Outside the alert path on purpose: the alert target is itself config.
+        logging.error(f"Configuration error: {e}")
+        raise SystemExit(1)
     ctx: dict[str, Any] = {}
     try:
-        await run_digest(ctx)
+        await run_digest(config, ctx)
     except Exception as e:
         logging.error(f"Digest run failed: {type(e).__name__}: {e}")
         await send_alert(
+            config,
             format_failure_alert(e, ctx.get('window', 'unknown window')),
             ctx.get('client'),
         )
