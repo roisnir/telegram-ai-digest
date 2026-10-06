@@ -4,6 +4,7 @@ import logging
 import os
 import pytest
 from datetime import datetime
+from functools import partial
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 from pytz import UTC, timezone
 
@@ -27,13 +28,20 @@ from digest import (
     create_digest,
     main,
     DIGEST_TOOL,
-    send_alert,
     check_digest_health,
+    LOCAL_TZ,
+)
+from alerts import (
+    AlertContext,
+    alert_failed,
+    alert_no_messages,
+    alert_unhealthy,
+    alert_whatsapp_failed,
+    send_alert,
     format_window,
     format_failure_alert,
     format_health_alert,
     _coerce_chat_id,
-    LOCAL_TZ,
 )
 
 
@@ -1981,7 +1989,7 @@ class TestAlertFormatting:
 
 
 # ---------------------------------------------------------------------------
-# send_alert (mocks Telethon at the network boundary)
+# Alerts delivery (mocks Telethon at the network boundary)
 # ---------------------------------------------------------------------------
 
 def _bot_factory():
@@ -1992,35 +2000,56 @@ def _bot_factory():
     return factory, bot
 
 
+def _alerts(chat_id, *, bot_token=None, client=None):
+    return AlertContext(chat_id, bot_token=bot_token, api_id=12345, api_hash='testhash',
+                        phone='+1234567890', client=client)
+
+
+class TestAlertContext:
+    def test_window_defaults_to_unknown(self):
+        assert _alerts('123').window == "unknown window"
+
+    def test_disabled_alerts_never_call_the_sender(self):
+        sender = AsyncMock()
+        ctx = AlertContext(None, sender=sender)
+        assert asyncio.run(alert_no_messages(ctx)) is False
+        sender.assert_not_called()
+
+    def test_sender_failure_is_logged_and_swallowed(self, caplog):
+        sender = AsyncMock(side_effect=RuntimeError("boom"))
+        ctx = AlertContext('123', sender=sender)
+        with caplog.at_level('ERROR'):
+            assert asyncio.run(alert_whatsapp_failed(ctx, "wa down")) is False
+        assert "Failed to send operator alert" in caplog.text
+        assert "Telegram delivery was fine" in caplog.text  # the alert text is still logged
+
+
 class TestSendAlert:
-    def test_noop_when_alert_chat_id_unset(self):
+    def test_noop_when_chat_id_unset(self):
         client = AsyncMock()
-        with patch('digest.ALERT_CHAT_ID', None), patch('digest.BOT_TOKEN', None), \
-             patch('digest.TelegramClient') as tg:
-            assert asyncio.run(send_alert("boom", client)) is False
+        with patch('alerts.TelegramClient') as tg:
+            assert asyncio.run(send_alert(_alerts(None, client=client), "boom")) is False
         client.send_message.assert_not_called()
         tg.assert_not_called()
 
-    def test_noop_when_alert_chat_id_empty_string(self):
-        with patch('digest.ALERT_CHAT_ID', ''), patch('digest.TelegramClient') as tg:
-            assert asyncio.run(send_alert("boom")) is False
+    def test_noop_when_chat_id_empty_string(self):
+        with patch('alerts.TelegramClient') as tg:
+            assert asyncio.run(send_alert(_alerts(''), "boom")) is False
         tg.assert_not_called()
 
     def test_sends_via_bot_when_bot_token_set(self):
         factory, bot = _bot_factory()
         client = AsyncMock()
-        with patch('digest.ALERT_CHAT_ID', '123456'), patch('digest.BOT_TOKEN', 'tok'), \
-             patch('digest.TelegramClient', return_value=factory):
-            assert asyncio.run(send_alert("boom", client)) is True
+        with patch('alerts.TelegramClient', return_value=factory):
+            assert asyncio.run(send_alert(_alerts('123456', bot_token='tok', client=client), "boom")) is True
         bot.send_message.assert_awaited_once_with(123456, "boom")
         bot.disconnect.assert_awaited_once()
         client.send_message.assert_not_called()
 
     def test_sends_via_supplied_user_client_without_bot_token(self):
         client = AsyncMock()
-        with patch('digest.ALERT_CHAT_ID', '@operator'), patch('digest.BOT_TOKEN', None), \
-             patch('digest.TelegramClient') as tg:
-            assert asyncio.run(send_alert("boom", client)) is True
+        with patch('alerts.TelegramClient') as tg:
+            assert asyncio.run(send_alert(_alerts('@operator', client=client), "boom")) is True
         client.send_message.assert_awaited_once_with("@operator", "boom")
         # The caller still owns the session it passed in.
         client.disconnect.assert_not_called()
@@ -2028,9 +2057,8 @@ class TestSendAlert:
 
     def test_starts_own_user_session_when_no_client_and_no_bot(self):
         own = AsyncMock()
-        with patch('digest.ALERT_CHAT_ID', 'me'), patch('digest.BOT_TOKEN', None), \
-             patch('digest.TelegramClient', return_value=own):
-            assert asyncio.run(send_alert("boom")) is True
+        with patch('alerts.TelegramClient', return_value=own):
+            assert asyncio.run(send_alert(_alerts('me'), "boom")) is True
         own.start.assert_awaited_once()
         own.send_message.assert_awaited_once_with("me", "boom")
         own.disconnect.assert_awaited_once()
@@ -2038,9 +2066,8 @@ class TestSendAlert:
     def test_send_failure_is_logged_and_swallowed(self, caplog):
         client = AsyncMock()
         client.send_message = AsyncMock(side_effect=RuntimeError("peer not found"))
-        with patch('digest.ALERT_CHAT_ID', '123'), patch('digest.BOT_TOKEN', None):
-            with caplog.at_level('ERROR'):
-                assert asyncio.run(send_alert("boom", client)) is False
+        with caplog.at_level('ERROR'):
+            assert asyncio.run(send_alert(_alerts('123', client=client), "boom")) is False
         assert "Failed to send operator alert" in caplog.text
         assert "peer not found" in caplog.text
         assert "boom" in caplog.text  # the alert we could not deliver is still logged
@@ -2048,16 +2075,14 @@ class TestSendAlert:
     def test_bot_start_failure_is_swallowed(self):
         factory = MagicMock()
         factory.start = AsyncMock(side_effect=RuntimeError("bad token"))
-        with patch('digest.ALERT_CHAT_ID', '123'), patch('digest.BOT_TOKEN', 'tok'), \
-             patch('digest.TelegramClient', return_value=factory):
-            assert asyncio.run(send_alert("boom")) is False
+        with patch('alerts.TelegramClient', return_value=factory):
+            assert asyncio.run(send_alert(_alerts('123', bot_token='tok'), "boom")) is False
 
     def test_disconnect_failure_is_swallowed(self):
         factory, bot = _bot_factory()
         bot.disconnect = AsyncMock(side_effect=RuntimeError("already closed"))
-        with patch('digest.ALERT_CHAT_ID', '123'), patch('digest.BOT_TOKEN', 'tok'), \
-             patch('digest.TelegramClient', return_value=factory):
-            assert asyncio.run(send_alert("boom")) is True
+        with patch('alerts.TelegramClient', return_value=factory):
+            assert asyncio.run(send_alert(_alerts('123', bot_token='tok'), "boom")) is True
 
 
 # ---------------------------------------------------------------------------
@@ -2067,20 +2092,31 @@ class TestSendAlert:
 class TestMainPipelineAlerts:
     """Alerting behaviour of the full pipeline.
 
-    Reuses TestMainPipeline's mock setup without re-running its tests. All runs
-    use --dry-run, so the only send_message call that can happen is an alert.
+    Reuses TestMainPipeline's mock setup without re-running its tests. Every
+    alert is recorded in ``self.sent`` by a fake sender injected into AlertContext, so
+    the assertions see the exact text that would have been delivered. All runs
+    use --dry-run unless a test says otherwise.
     """
 
     IN_WINDOW  = TestMainPipeline.IN_WINDOW
     _DATE_ARGS = TestMainPipeline._DATE_ARGS
     _setup     = TestMainPipeline._setup
 
-    def _run(self, argv_extra, mock_tg, mock_ac, alert_chat_id='999'):
+    def _run(self, argv_extra, mock_tg, mock_ac, alert_chat_id='999', dry_run=True, send_error=None):
+        self.sent = []
+
+        async def record(text):
+            if send_error is not None:
+                raise send_error
+            self.sent.append(text)
+
+        argv = ['digest.py'] + (['--dry-run'] if dry_run else []) + argv_extra + self._DATE_ARGS
         with patch('digest.TelegramClient', return_value=mock_tg), \
              patch('digest.anthropic.AsyncAnthropic', return_value=mock_ac), \
+             patch('digest.AlertContext', partial(AlertContext, sender=record)), \
              patch('digest.ALERT_CHAT_ID', alert_chat_id), \
              patch('digest.BOT_TOKEN', None), \
-             patch('sys.argv', ['digest.py', '--dry-run'] + argv_extra + self._DATE_ARGS):
+             patch('sys.argv', argv):
             asyncio.run(main())
 
     @staticmethod
@@ -2099,7 +2135,7 @@ class TestMainPipelineAlerts:
         mock_tg, mock_ac = self._setup(msgs, big_news=self._big_news([100]))  # 33% coverage
         self._run(['--output', str(tmp_path / "out.html")], mock_tg, mock_ac,
                   alert_chat_id=None)
-        mock_tg.send_message.assert_not_called()
+        assert self.sent == []
         assert (tmp_path / "out.html").exists()
 
     def test_no_alert_when_run_fails_and_feature_is_off(self, tmp_path):
@@ -2108,7 +2144,7 @@ class TestMainPipelineAlerts:
         with pytest.raises(RuntimeError):
             self._run(['--output', str(tmp_path / "out.html")], mock_tg, mock_ac,
                       alert_chat_id=None)
-        mock_tg.send_message.assert_not_called()
+        assert self.sent == []
 
     # -- failure triggers -------------------------------------------------
     def test_exception_during_run_alerts_and_reraises(self, tmp_path):
@@ -2119,8 +2155,8 @@ class TestMainPipelineAlerts:
         with pytest.raises(RuntimeError):
             self._run(['--output', str(tmp_path / "out.html")], mock_tg, mock_ac)
 
-        mock_tg.send_message.assert_called_once()
-        text = mock_tg.send_message.call_args[0][1]
+        assert len(self.sent) == 1
+        text = self.sent[0]
         assert "FAILED" in text
         assert "RuntimeError" in text
         assert "Your credit balance is too low" in text
@@ -2139,16 +2175,16 @@ class TestMainPipelineAlerts:
         with pytest.raises(SystemExit):
             self._run(['--output', str(tmp_path / "out.html")], mock_tg, mock_ac)
 
-        mock_tg.send_message.assert_called_once()
-        text = mock_tg.send_message.call_args[0][1]
+        assert len(self.sent) == 1
+        text = self.sent[0]
         assert "FAILED" in text and "max_tokens" in text
         assert not (tmp_path / "out.html").exists()
 
     def test_no_messages_fetched_alerts(self, tmp_path):
         mock_tg, mock_ac = self._setup([])
         self._run(['--output', str(tmp_path / "out.html")], mock_tg, mock_ac)
-        mock_tg.send_message.assert_called_once()
-        text = mock_tg.send_message.call_args[0][1]
+        assert len(self.sent) == 1
+        text = self.sent[0]
         assert "No digest published" in text
         assert "2026-05-13 11:00" in text
 
@@ -2160,8 +2196,8 @@ class TestMainPipelineAlerts:
 
         self._run(['--output', output], mock_tg, mock_ac)
 
-        mock_tg.send_message.assert_called_once()
-        text = mock_tg.send_message.call_args[0][1]
+        assert len(self.sent) == 1
+        text = self.sent[0]
         assert "2" in text and "non-ad message" in text
         assert output in text  # page path is included
         assert (tmp_path / "out.html").exists()  # the digest still published
@@ -2170,14 +2206,14 @@ class TestMainPipelineAlerts:
         msgs = [_tg_msg(i, text="חדשות", dt=self.IN_WINDOW) for i in (100, 101, 102)]
         mock_tg, mock_ac = self._setup(msgs, big_news=self._big_news([100, 101, 102]))
         self._run(['--output', str(tmp_path / "out.html")], mock_tg, mock_ac)
-        mock_tg.send_message.assert_not_called()
+        assert self.sent == []
 
     def test_missing_ad_message_does_not_alert(self, tmp_path):
         msgs = [_tg_msg(i, text="חדשות", dt=self.IN_WINDOW) for i in (100, 101)]
         msgs.append(_tg_msg(102, text="°תוכן שיווקי מודעה", dt=self.IN_WINDOW))
         mock_tg, mock_ac = self._setup(msgs, big_news=self._big_news([100, 101]))  # ad (102) uncovered
         self._run(['--output', str(tmp_path / "out.html")], mock_tg, mock_ac)
-        mock_tg.send_message.assert_not_called()
+        assert self.sent == []
 
     def test_empty_big_news_alerts_even_with_full_coverage(self, tmp_path):
         msgs = [_tg_msg(i, text="חדשות", dt=self.IN_WINDOW) for i in (100, 101, 102)]
@@ -2192,8 +2228,8 @@ class TestMainPipelineAlerts:
 
         self._run(['--output', str(tmp_path / "out.html")], mock_tg, mock_ac)
 
-        mock_tg.send_message.assert_called_once()
-        assert "no big_news" in mock_tg.send_message.call_args[0][1]
+        assert len(self.sent) == 1
+        assert "no big_news" in self.sent[0]
 
     def test_unparseable_big_news_string_alerts(self, tmp_path):
         """The 2026-08-28 shape: model returns big_news as an unparseable string.
@@ -2216,8 +2252,8 @@ class TestMainPipelineAlerts:
         with pytest.raises(SystemExit):
             self._run(['--output', str(tmp_path / "out.html")], mock_tg, mock_ac)
 
-        mock_tg.send_message.assert_called_once()
-        text = mock_tg.send_message.call_args[0][1]
+        assert len(self.sent) == 1
+        text = self.sent[0]
         assert "FAILED" in text
         assert not (tmp_path / "out.html").exists()
 
@@ -2225,10 +2261,10 @@ class TestMainPipelineAlerts:
     def test_alert_send_failure_does_not_break_a_published_run(self, tmp_path, caplog):
         msgs = [_tg_msg(i, text="חדשות", dt=self.IN_WINDOW) for i in (100, 101, 102)]
         mock_tg, mock_ac = self._setup(msgs, big_news=self._big_news([100]))
-        mock_tg.send_message = AsyncMock(side_effect=RuntimeError("chat not found"))
 
         with caplog.at_level('ERROR'):
-            self._run(['--output', str(tmp_path / "out.html")], mock_tg, mock_ac)
+            self._run(['--output', str(tmp_path / "out.html")], mock_tg, mock_ac,
+                      send_error=RuntimeError("chat not found"))
 
         assert "Failed to send operator alert" in caplog.text
         assert (tmp_path / "out.html").exists()  # digest still published
@@ -2236,10 +2272,95 @@ class TestMainPipelineAlerts:
     def test_alert_send_failure_does_not_mask_original_error(self, tmp_path, caplog):
         mock_tg, mock_ac = self._setup([_tg_msg(100, text="x", dt=self.IN_WINDOW)])
         mock_ac.messages.stream = MagicMock(side_effect=RuntimeError("original failure"))
-        mock_tg.send_message = AsyncMock(side_effect=RuntimeError("chat not found"))
 
         with caplog.at_level('ERROR'):
             with pytest.raises(RuntimeError, match="original failure"):
-                self._run(['--output', str(tmp_path / "out.html")], mock_tg, mock_ac)
+                self._run(['--output', str(tmp_path / "out.html")], mock_tg, mock_ac,
+                          send_error=RuntimeError("chat not found"))
 
         assert "Failed to send operator alert" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Alert wording — golden strings. Pin the exact text of every operator alert so
+# the alerts consolidation can't change a byte of what the operator reads.
+# ---------------------------------------------------------------------------
+
+class TestAlertWordingGolden:
+    """Each operator alert's exact text, produced by the real pipeline call site.
+
+    Window is 2026-05-13 08:00-12:00 UTC == 11:00-15:00 Israel (IDT).
+    """
+
+    WINDOW = "2026-05-13 11:00 -> 2026-05-13 15:00 Israel"
+    IN_WINDOW = TestMainPipelineAlerts.IN_WINDOW
+    _DATE_ARGS = TestMainPipelineAlerts._DATE_ARGS
+    _setup = TestMainPipelineAlerts._setup
+    _run = TestMainPipelineAlerts._run
+    _link = staticmethod(TestMainPipelineAlerts._link)
+    _big_news = TestMainPipelineAlerts._big_news
+
+    def test_failure_alert_from_exception(self, tmp_path):
+        mock_tg, mock_ac = self._setup([_tg_msg(100, text="x", dt=self.IN_WINDOW)])
+        mock_ac.messages.stream = MagicMock(
+            side_effect=RuntimeError("Your credit balance is too low"))
+        with pytest.raises(RuntimeError):
+            self._run(['--output', str(tmp_path / "out.html")], mock_tg, mock_ac)
+        assert self.sent == [
+            "🚨 Digest run FAILED — nothing was published.\n"
+            f"Window: {self.WINDOW}\n"
+            "Error: RuntimeError: Your credit balance is too low"
+        ]
+
+    def test_failure_alert_from_create_digest_returning_none(self, tmp_path):
+        mock_tg, mock_ac = self._setup([_tg_msg(100, text="x", dt=self.IN_WINDOW)])
+        truncated = Mock()
+        truncated.stop_reason = "max_tokens"
+        truncated.usage = Mock(output_tokens=64000)
+        truncated.content = []
+        mock_ac.messages.stream.return_value.__aenter__.return_value.get_final_message = \
+            AsyncMock(return_value=truncated)
+        with pytest.raises(SystemExit):
+            self._run(['--output', str(tmp_path / "out.html")], mock_tg, mock_ac)
+        assert self.sent == [
+            "🚨 Digest run FAILED — nothing was published.\n"
+            f"Window: {self.WINDOW}\n"
+            "Stage: claude\n"
+            "Error: create_digest() returned no digest — output truncated at max_tokens, "
+            "or no tool_use block came back. See the run log."
+        ]
+
+    def test_no_messages_alert(self, tmp_path):
+        mock_tg, mock_ac = self._setup([])
+        self._run(['--output', str(tmp_path / "out.html")], mock_tg, mock_ac)
+        assert self.sent == [
+            "⚠️ No digest published.\n"
+            f"Window: {self.WINDOW}\n"
+            "No messages were fetched from any channel — quiet window, or a broken fetch."
+        ]
+
+    def test_unhealthy_alert(self, tmp_path):
+        output = str(tmp_path / "out.html")
+        msgs = [_tg_msg(i, text="חדשות", dt=self.IN_WINDOW) for i in (100, 101, 102)]
+        mock_tg, mock_ac = self._setup(msgs, big_news=self._big_news([100]))  # 2 of 3 missing
+        self._run(['--output', output], mock_tg, mock_ac)
+        assert self.sent == [
+            "⚠️ Digest published but looks wrong.\n"
+            f"Window: {self.WINDOW}\n"
+            "Coverage: 1/3 (33%)\n"
+            "• 2 non-ad messages missing from the digest\n"
+            f"Page: {output}"
+        ]
+
+    def test_whatsapp_failure_alert(self, tmp_path):
+        output = str(tmp_path / "out.html")
+        msgs = [_tg_msg(i, text="חדשות", dt=self.IN_WINDOW) for i in (100, 101, 102)]
+        mock_tg, mock_ac = self._setup(msgs, big_news=self._big_news([100, 101, 102]))  # full coverage
+        with patch('digest.send_whatsapp', AsyncMock(return_value="WhatsApp send timed out after 120s")):
+            self._run(['--output', output], mock_tg, mock_ac, dry_run=False)
+        # The Telegram digest post itself is not an alert; only the WhatsApp failure is.
+        mock_tg.send_message.assert_called_once()
+        assert self.sent == [
+            "⚠️ WhatsApp send timed out after 120s\n"
+            "Telegram delivery was fine."
+        ]
