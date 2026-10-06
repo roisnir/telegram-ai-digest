@@ -2,12 +2,14 @@
 
 Every alert is built and sent from here, so they all share the same window
 line, length limit and plain-text rule. Adding an alert kind means adding one
-method to ``Alerts``. Sending is best-effort: nothing here raises, so an alert
-that can't be delivered never breaks a run or hides the error it reports.
+function that takes an ``AlertContext``. Sending is best-effort: nothing here
+raises, so an alert that can't be delivered never breaks a run or hides the
+error it reports.
 """
 import logging
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable, Awaitable
 
 from pytz import timezone
 from telethon import TelegramClient
@@ -77,92 +79,92 @@ def format_health_alert(
     return "\n".join(lines)
 
 
-class Alerts:
-    """Operator alerts for one run. Off entirely when ``chat_id`` is falsy.
+@dataclass
+class AlertContext:
+    """Config and run state the alert functions need. Off entirely when ``chat_id`` is falsy.
 
     Set ``window`` as soon as the run's window is known, and ``client`` once the
     user session is connected. Until then alerts say "unknown window" and, if
     there is no connected client, start their own user session.
 
-    ``sender`` replaces the Telegram delivery (tests pass a fake). Each public
-    method returns True if the alert was sent.
+    ``sender`` replaces the Telegram delivery (tests pass a fake). Each
+    ``alert_*`` function returns True if the alert was sent.
     """
+    chat_id: str | None
+    bot_token: str | None = None
+    api_id: int | None = None
+    api_hash: str | None = None
+    phone: str | None = None
+    window: str = _UNKNOWN_WINDOW
+    client: TelegramClient | None = None
+    sender: Callable[[str], Awaitable[None]] | None = None
 
-    def __init__(
-        self,
-        chat_id: str | None,
-        *,
-        bot_token: str | None = None,
-        api_id: int | None = None,
-        api_hash: str | None = None,
-        phone: str | None = None,
-        sender=None,
-    ):
-        self.chat_id = chat_id
-        self.bot_token = bot_token
-        self.api_id = api_id
-        self.api_hash = api_hash
-        self.phone = phone
-        self.window = _UNKNOWN_WINDOW
-        self.client = None
-        self._sender = sender or self._send_telethon
 
-    async def failed(self, error: BaseException | str, stage: str = "") -> bool:
-        return await self._send(format_failure_alert(error, self.window, stage))
+async def alert_failed(ctx: AlertContext, error: BaseException | str, stage: str = "") -> bool:
+    return await send_alert(ctx, format_failure_alert(error, ctx.window, stage))
 
-    async def unhealthy(self, issues: list[str], coverage: dict[str, Any], page_url: str | None = None) -> bool:
-        return await self._send(format_health_alert(issues, coverage, self.window, page_url))
 
-    async def no_messages(self) -> bool:
-        return await self._send(
-            f"⚠️ No digest published.\nWindow: {self.window}\n"
-            "No messages were fetched from any channel — quiet window, or a broken fetch."
+async def alert_unhealthy(
+    ctx: AlertContext, issues: list[str], coverage: dict[str, Any], page_url: str | None = None,
+) -> bool:
+    return await send_alert(ctx, format_health_alert(issues, coverage, ctx.window, page_url))
+
+
+async def alert_no_messages(ctx: AlertContext) -> bool:
+    return await send_alert(
+        ctx,
+        f"⚠️ No digest published.\nWindow: {ctx.window}\n"
+        "No messages were fetched from any channel — quiet window, or a broken fetch.",
+    )
+
+
+async def alert_whatsapp_failed(ctx: AlertContext, wa_error: str) -> bool:
+    return await send_alert(ctx, f"⚠️ {wa_error}\nTelegram delivery was fine.")
+
+
+async def send_alert(ctx: AlertContext, text: str) -> bool:
+    """Best-effort send of ``text``. Never raises."""
+    if not ctx.chat_id:
+        return False
+    send = ctx.sender or (lambda t: _send_telethon(ctx, t))
+    try:
+        await send(text)
+        return True
+    except Exception as e:
+        logging.error(
+            f"Failed to send operator alert ({type(e).__name__}: {e}). "
+            f"Alert text was: {text}"
         )
+        return False
 
-    async def whatsapp_failed(self, wa_error: str) -> bool:
-        return await self._send(f"⚠️ {wa_error}\nTelegram delivery was fine.")
 
-    async def _send(self, text: str) -> bool:
-        """Best-effort send of ``text``. Never raises."""
-        if not self.chat_id:
-            return False
-        try:
-            await self._sender(text)
-            return True
-        except Exception as e:
-            logging.error(
-                f"Failed to send operator alert ({type(e).__name__}: {e}). "
-                f"Alert text was: {text}"
-            )
-            return False
+async def _send_telethon(ctx: AlertContext, text: str) -> None:
+    """Send via the bot if BOT_TOKEN is set, else the connected user session, else a fresh one.
 
-    async def _send_telethon(self, text: str) -> None:
-        """Send via the bot if BOT_TOKEN is set, else the connected user session, else a fresh one.
-
-        Sent as plain text on purpose: the digest message uses parse_mode='html',
-        but alert bodies embed arbitrary exception text that would break HTML
-        parsing and silently drop the alert.
-        """
-        bot = None
-        own_client = None
-        try:
-            target = _coerce_chat_id(self.chat_id)
-            if self.bot_token:
-                bot = await TelegramClient(StringSession(), self.api_id, self.api_hash).start(bot_token=self.bot_token)
-                sender = bot
-            elif self.client is not None:
-                sender = self.client
-            else:
-                own_client = TelegramClient('session', self.api_id, self.api_hash)
-                await own_client.start(phone=self.phone)
-                sender = own_client
-            await sender.send_message(target, text)
-            logging.info(f"Operator alert sent to {target}")
-        finally:
-            for c in (bot, own_client):
-                if c is None:
-                    continue
-                try:
-                    await c.disconnect()
-                except Exception as e:
-                    logging.warning(f"Failed to disconnect alert client: {e}")
+    Sent as plain text on purpose: the digest message uses parse_mode='html',
+    but alert bodies embed arbitrary exception text that would break HTML
+    parsing and silently drop the alert.
+    """
+    bot = None
+    own_client = None
+    try:
+        target = _coerce_chat_id(ctx.chat_id)
+        if ctx.bot_token:
+            bot = await TelegramClient(StringSession(), ctx.api_id, ctx.api_hash).start(bot_token=ctx.bot_token)
+            sender = bot
+        elif ctx.client is not None:
+            sender = ctx.client
+        else:
+            own_client = TelegramClient('session', ctx.api_id, ctx.api_hash)
+            await own_client.start(phone=ctx.phone)
+            sender = own_client
+        await sender.send_message(target, text)
+        logging.info(f"Operator alert sent to {target}")
+    finally:
+        for c in (bot, own_client):
+            if c is None:
+                continue
+            try:
+                await c.disconnect()
+            except Exception as e:
+                logging.warning(f"Failed to disconnect alert client: {e}")

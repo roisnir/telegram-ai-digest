@@ -14,7 +14,10 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 from pytz import UTC
 
-from alerts import Alerts, LOCAL_TZ, format_window
+from alerts import (
+    AlertContext, LOCAL_TZ, alert_failed, alert_no_messages, alert_unhealthy,
+    alert_whatsapp_failed, format_window,
+)
 
 MAX_OUTPUT_TOKENS = 64000
 OUTPUT_TOKEN_WARN_THRESHOLD = 48000  # 75% of the model's 64K output ceiling
@@ -1024,7 +1027,7 @@ async def _wa_send_once(text: str) -> str | None:
 # Main
 # ---------------------------------------------------------------------------
 
-async def run_digest(alerts: Alerts) -> None:
+async def run_digest(alerts: AlertContext) -> None:
     """The digest pipeline. ``alerts`` gets the window and client main() needs when alerting."""
     parser = argparse.ArgumentParser(description='Generate daily Telegram news update as HTML page.')
     parser.add_argument('--startdate', type=str, help='Start datetime YYYY-MM-DD or YYYY-MM-DD HH:MM (UTC)')
@@ -1081,7 +1084,7 @@ async def run_digest(alerts: Alerts) -> None:
             # The operator still gets no digest though, so say so — that is
             # exactly the "no digests arrived and nobody noticed" mode.
             logging.warning("No messages fetched from any channel — nothing to publish.")
-            await alerts.no_messages()
+            await alert_no_messages(alerts)
             await client.disconnect()
             return
 
@@ -1093,7 +1096,8 @@ async def run_digest(alerts: Alerts) -> None:
             # max_tokens truncation, and a missing tool_use block. Nothing is
             # published, and the process exits non-zero so cron/run.sh notice.
             logging.error("Failed to generate update — nothing published.")
-            await alerts.failed(
+            await alert_failed(
+                alerts,
                 "create_digest() returned no digest — output truncated at max_tokens, "
                 "or no tool_use block came back. See the run log.",
                 stage="claude",
@@ -1129,12 +1133,12 @@ async def run_digest(alerts: Alerts) -> None:
         wa_error = await send_whatsapp(format_whatsapp_message(digest, end_date, page_url))
         if wa_error:
             logging.error(wa_error)
-            await alerts.whatsapp_failed(wa_error)
+            await alert_whatsapp_failed(alerts, wa_error)
 
     issues, coverage = check_digest_health(digest, source_map)
     if issues:
         logging.warning(f"Digest published but looks wrong: {'; '.join(issues)}")
-        await alerts.unhealthy(issues, coverage, page_url)
+        await alert_unhealthy(alerts, issues, coverage, page_url)
 
     if not args.fixture:
         await client.disconnect()
@@ -1143,13 +1147,13 @@ async def run_digest(alerts: Alerts) -> None:
 
 async def main() -> None:
     """Run the digest, alerting the operator on failure. Re-raises after alerting."""
-    alerts = Alerts(chat_id=ALERT_CHAT_ID, bot_token=BOT_TOKEN, api_id=API_ID,
+    alerts = AlertContext(chat_id=ALERT_CHAT_ID, bot_token=BOT_TOKEN, api_id=API_ID,
                     api_hash=API_HASH, phone=PHONE_NUMBER)
     try:
         await run_digest(alerts)
     except Exception as e:
         logging.error(f"Digest run failed: {type(e).__name__}: {e}")
-        await alerts.failed(e)
+        await alert_failed(alerts, e)
         raise
 
 

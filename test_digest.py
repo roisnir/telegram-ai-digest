@@ -32,7 +32,12 @@ from digest import (
     LOCAL_TZ,
 )
 from alerts import (
-    Alerts,
+    AlertContext,
+    alert_failed,
+    alert_no_messages,
+    alert_unhealthy,
+    alert_whatsapp_failed,
+    send_alert,
     format_window,
     format_failure_alert,
     format_health_alert,
@@ -1996,27 +2001,25 @@ def _bot_factory():
 
 
 def _alerts(chat_id, *, bot_token=None, client=None):
-    alerts = Alerts(chat_id, bot_token=bot_token, api_id=12345, api_hash='testhash',
-                    phone='+1234567890')
-    alerts.client = client
-    return alerts
+    return AlertContext(chat_id, bot_token=bot_token, api_id=12345, api_hash='testhash',
+                        phone='+1234567890', client=client)
 
 
-class TestAlertsObject:
+class TestAlertContext:
     def test_window_defaults_to_unknown(self):
         assert _alerts('123').window == "unknown window"
 
     def test_disabled_alerts_never_call_the_sender(self):
         sender = AsyncMock()
-        alerts = Alerts(None, sender=sender)
-        assert asyncio.run(alerts.no_messages()) is False
+        ctx = AlertContext(None, sender=sender)
+        assert asyncio.run(alert_no_messages(ctx)) is False
         sender.assert_not_called()
 
     def test_sender_failure_is_logged_and_swallowed(self, caplog):
         sender = AsyncMock(side_effect=RuntimeError("boom"))
-        alerts = Alerts('123', sender=sender)
+        ctx = AlertContext('123', sender=sender)
         with caplog.at_level('ERROR'):
-            assert asyncio.run(alerts.whatsapp_failed("wa down")) is False
+            assert asyncio.run(alert_whatsapp_failed(ctx, "wa down")) is False
         assert "Failed to send operator alert" in caplog.text
         assert "Telegram delivery was fine" in caplog.text  # the alert text is still logged
 
@@ -2025,20 +2028,20 @@ class TestSendAlert:
     def test_noop_when_chat_id_unset(self):
         client = AsyncMock()
         with patch('alerts.TelegramClient') as tg:
-            assert asyncio.run(_alerts(None, client=client)._send("boom")) is False
+            assert asyncio.run(send_alert(_alerts(None, client=client), "boom")) is False
         client.send_message.assert_not_called()
         tg.assert_not_called()
 
     def test_noop_when_chat_id_empty_string(self):
         with patch('alerts.TelegramClient') as tg:
-            assert asyncio.run(_alerts('')._send("boom")) is False
+            assert asyncio.run(send_alert(_alerts(''), "boom")) is False
         tg.assert_not_called()
 
     def test_sends_via_bot_when_bot_token_set(self):
         factory, bot = _bot_factory()
         client = AsyncMock()
         with patch('alerts.TelegramClient', return_value=factory):
-            assert asyncio.run(_alerts('123456', bot_token='tok', client=client)._send("boom")) is True
+            assert asyncio.run(send_alert(_alerts('123456', bot_token='tok', client=client), "boom")) is True
         bot.send_message.assert_awaited_once_with(123456, "boom")
         bot.disconnect.assert_awaited_once()
         client.send_message.assert_not_called()
@@ -2046,7 +2049,7 @@ class TestSendAlert:
     def test_sends_via_supplied_user_client_without_bot_token(self):
         client = AsyncMock()
         with patch('alerts.TelegramClient') as tg:
-            assert asyncio.run(_alerts('@operator', client=client)._send("boom")) is True
+            assert asyncio.run(send_alert(_alerts('@operator', client=client), "boom")) is True
         client.send_message.assert_awaited_once_with("@operator", "boom")
         # The caller still owns the session it passed in.
         client.disconnect.assert_not_called()
@@ -2055,7 +2058,7 @@ class TestSendAlert:
     def test_starts_own_user_session_when_no_client_and_no_bot(self):
         own = AsyncMock()
         with patch('alerts.TelegramClient', return_value=own):
-            assert asyncio.run(_alerts('me')._send("boom")) is True
+            assert asyncio.run(send_alert(_alerts('me'), "boom")) is True
         own.start.assert_awaited_once()
         own.send_message.assert_awaited_once_with("me", "boom")
         own.disconnect.assert_awaited_once()
@@ -2064,7 +2067,7 @@ class TestSendAlert:
         client = AsyncMock()
         client.send_message = AsyncMock(side_effect=RuntimeError("peer not found"))
         with caplog.at_level('ERROR'):
-            assert asyncio.run(_alerts('123', client=client)._send("boom")) is False
+            assert asyncio.run(send_alert(_alerts('123', client=client), "boom")) is False
         assert "Failed to send operator alert" in caplog.text
         assert "peer not found" in caplog.text
         assert "boom" in caplog.text  # the alert we could not deliver is still logged
@@ -2073,13 +2076,13 @@ class TestSendAlert:
         factory = MagicMock()
         factory.start = AsyncMock(side_effect=RuntimeError("bad token"))
         with patch('alerts.TelegramClient', return_value=factory):
-            assert asyncio.run(_alerts('123', bot_token='tok')._send("boom")) is False
+            assert asyncio.run(send_alert(_alerts('123', bot_token='tok'), "boom")) is False
 
     def test_disconnect_failure_is_swallowed(self):
         factory, bot = _bot_factory()
         bot.disconnect = AsyncMock(side_effect=RuntimeError("already closed"))
         with patch('alerts.TelegramClient', return_value=factory):
-            assert asyncio.run(_alerts('123', bot_token='tok')._send("boom")) is True
+            assert asyncio.run(send_alert(_alerts('123', bot_token='tok'), "boom")) is True
 
 
 # ---------------------------------------------------------------------------
@@ -2090,7 +2093,7 @@ class TestMainPipelineAlerts:
     """Alerting behaviour of the full pipeline.
 
     Reuses TestMainPipeline's mock setup without re-running its tests. Every
-    alert is recorded in ``self.sent`` by a fake sender injected into Alerts, so
+    alert is recorded in ``self.sent`` by a fake sender injected into AlertContext, so
     the assertions see the exact text that would have been delivered. All runs
     use --dry-run unless a test says otherwise.
     """
@@ -2110,7 +2113,7 @@ class TestMainPipelineAlerts:
         argv = ['digest.py'] + (['--dry-run'] if dry_run else []) + argv_extra + self._DATE_ARGS
         with patch('digest.TelegramClient', return_value=mock_tg), \
              patch('digest.anthropic.AsyncAnthropic', return_value=mock_ac), \
-             patch('digest.Alerts', partial(Alerts, sender=record)), \
+             patch('digest.AlertContext', partial(AlertContext, sender=record)), \
              patch('digest.ALERT_CHAT_ID', alert_chat_id), \
              patch('digest.BOT_TOKEN', None), \
              patch('sys.argv', argv):
